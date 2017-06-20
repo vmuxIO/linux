@@ -22,6 +22,7 @@ int cmd_sched(int argc, const char **argv);
 int cmd_kallsyms(int argc, const char **argv);
 int cmd_list(int argc, const char **argv);
 int cmd_record(int argc, const char **argv);
+int cmd_record_indirect(int argc, const char **argv);
 int cmd_report(int argc, const char **argv);
 int cmd_stat(int argc, const char **argv);
 int cmd_timechart(int argc, const char **argv);

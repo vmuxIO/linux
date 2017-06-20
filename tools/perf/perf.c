@@ -56,6 +56,7 @@ static struct cmd_struct commands[] = {
 	{ "kallsyms",	cmd_kallsyms,	0 },
 	{ "list",	cmd_list,	0 },
 	{ "record",	cmd_record,	0 },
+	{ "record-indirect-branches",	cmd_record_record_indirect_branches,	0 },
 	{ "report",	cmd_report,	0 },
 	{ "bench",	cmd_bench,	0 },
 	{ "stat",	cmd_stat,	0 },
