@@ -167,6 +167,7 @@ int sample__fprintf_callchain(struct perf_sample *sample, int left_alignment,
 			if (print_srcline)
 				printed += map__fprintf_srcline(node->map, addr, "\n  ", fp);
 
+
 			if (node->sym && node->sym->inlined)
 				printed += fprintf(fp, " (inlined)");
 
@@ -194,6 +195,7 @@ int sample__fprintf_sym(struct perf_sample *sample, struct addr_location *al,
 			struct callchain_cursor *cursor, FILE *fp)
 {
 	int printed = 0;
+	u64 offset = 0;
 	int print_ip = print_opts & EVSEL__PRINT_IP;
 	int print_sym = print_opts & EVSEL__PRINT_SYM;
 	int print_dso = print_opts & EVSEL__PRINT_DSO;
@@ -210,6 +212,11 @@ int sample__fprintf_sym(struct perf_sample *sample, struct addr_location *al,
 		if (print_ip)
 			printed += fprintf(fp, "%16" PRIx64, sample->ip);
 
+		if (al->map) {
+			offset = al->map->map_ip(al->map, sample->ip);
+		}
+
+
 		if (print_sym) {
 			printed += fprintf(fp, " ");
 			if (print_symoffset) {
@@ -225,6 +232,7 @@ int sample__fprintf_sym(struct perf_sample *sample, struct addr_location *al,
 		if (print_dso) {
 			printed += fprintf(fp, " (");
 			printed += map__fprintf_dsoname(al->map, fp);
+			printed += fprintf(fp, "+%" PRIx64, offset);
 			printed += fprintf(fp, ")");
 		}
 

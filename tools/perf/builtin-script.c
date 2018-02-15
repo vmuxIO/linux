@@ -1024,12 +1024,17 @@ static int perf_sample__fprintf_addr(struct perf_sample *sample,
 				     struct perf_event_attr *attr, FILE *fp)
 {
 	struct addr_location al;
+	u64 offset = 0;
 	int printed = fprintf(fp, "%16" PRIx64, sample->addr);
 
 	if (!sample_addr_correlates_sym(attr))
 		goto out;
 
 	thread__resolve(thread, &al, sample);
+
+	if (al.map) {
+		offset = al.map->map_ip(al.map, sample->addr);
+	}
 
 	if (PRINT_FIELD(SYM)) {
 		printed += fprintf(fp, " ");
@@ -1042,6 +1047,7 @@ static int perf_sample__fprintf_addr(struct perf_sample *sample,
 	if (PRINT_FIELD(DSO)) {
 		printed += fprintf(fp, " (");
 		printed += map__fprintf_dsoname(al.map, fp);
+		printed += fprintf(fp, "+%" PRIx64, offset);
 		printed += fprintf(fp, ")");
 	}
 out:
