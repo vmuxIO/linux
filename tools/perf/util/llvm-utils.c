@@ -239,7 +239,7 @@ static int detect_kbuild_dir(char **kbuild_dir)
 			return -EINVAL;
 
 		test_dir = release;
-		prefix_dir = "/lib/modules/";
+		prefix_dir = KERNELDIR "/lib/modules/";
 		suffix_dir = "/build";
 	}
 
