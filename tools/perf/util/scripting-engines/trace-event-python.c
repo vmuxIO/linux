@@ -523,6 +523,8 @@ static PyObject *get_perf_sample_dict(struct perf_sample *sample,
 			_PyLong_FromLong(sample->tid));
 	pydict_set_item_string_decref(dict_sample, "cpu",
 			_PyLong_FromLong(sample->cpu));
+	pydict_set_item_string_decref(dict_sample, "addr",
+			PyLong_FromUnsignedLongLong(sample->addr));
 	pydict_set_item_string_decref(dict_sample, "ip",
 			PyLong_FromUnsignedLongLong(sample->ip));
 	pydict_set_item_string_decref(dict_sample, "time",
