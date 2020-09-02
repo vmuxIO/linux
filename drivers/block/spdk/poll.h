@@ -10,7 +10,7 @@
 
 struct spdk_poll_ctx {
 	size_t idx;
-	struct task_struct *thread;
+	struct delayed_work	work;
 	struct spdk_device *dev;
 	struct spdk_nvme_qpair *qpair;
 	size_t queue_length;
@@ -26,7 +26,7 @@ struct spdk_cmd {
 	uint32_t iov_offset;
 };
 
-int spdk_poll_thread(struct spdk_poll_ctx *ctx);
+void spdk_poll_worker(struct work_struct *work);
 void spdk_process_request(struct request *rq, struct spdk_poll_ctx *ctx);
 
 #endif

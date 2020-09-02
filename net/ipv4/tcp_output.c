@@ -2242,7 +2242,8 @@ static bool tcp_small_queue_check(struct sock *sk, const struct sk_buff *skb,
 		 * after softirq/tasklet schedule.
 		 * This helps when TX completions are delayed too much.
 		 */
-		i40_clean_queue(0, 0);
+		// TODO is this enough?
+		i40_clean_queue(0, skb->queue_mapping);
 		if (refcount_read(&sk->sk_wmem_alloc) > limit) {
 			return false;
 		}

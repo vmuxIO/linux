@@ -21,13 +21,8 @@ extern unsigned long spdk_dma_mempool_size;
 static void free_poll_contexts(struct spdk_poll_ctx *contexts, size_t num)
 {
 	size_t i;
-	struct spdk_poll_ctx *ctx;
-
 	for (i = 0; i < num; i++) {
-		ctx = &contexts[i];
-		if (ctx->thread) {
-			kthread_stop(ctx->thread);
-		}
+		cancel_delayed_work_sync(&contexts[i].work);
 	}
 	kfree(contexts);
 }
@@ -36,26 +31,13 @@ static int init_poll_context(struct spdk_poll_ctx *ctx, struct spdk_device *dev,
 			     struct spdk_nvme_qpair *qpair, size_t idx)
 {
 	int err;
-	struct task_struct *thread = NULL;
 
 	ctx->dev = dev;
 	ctx->qpair = qpair;
 	ctx->idx = idx;
-	init_waitqueue_head(&ctx->wait_queue);
 
-	thread = kthread_create((int (*)(void *))(spdk_poll_thread), ctx, "spdk-%ld", idx);
-	if (IS_ERR(thread)) {
-		return PTR_ERR(thread);
-	}
-	struct sched_param sched_priority = { .sched_priority = 0 };
-	///* Set maximum priority to preempt all other threads on this CPU. */
-	if (sched_setscheduler_nocheck(thread, SCHED_IDLE, &sched_priority))
-		pr_warn("Failed to set suspend thread scheduler on CPU %d\n", smp_processor_id());
+	INIT_DELAYED_WORK(&ctx->work, spdk_poll_worker);
 
-	kthread_bind(thread, idx);
-	wake_up_process(thread);
-
-	ctx->thread = thread;
 	return 0;
 };
 

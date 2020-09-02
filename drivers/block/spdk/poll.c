@@ -1,5 +1,6 @@
 #include "poll.h"
 #include "linux/smp.h"
+#include "linux/workqueue.h"
 #include "thread.h"
 
 #include <linux/llist.h>
@@ -295,30 +296,16 @@ void spdk_process_request(struct request *rq, struct spdk_poll_ctx *ctx)
 	}
 }
 
-extern int lkl_max_cpu_no;
-extern int spdk_shutdown;
-
-int spdk_poll_thread(struct spdk_poll_ctx *ctx)
+void spdk_poll_worker(struct work_struct *work)
 {
-	//struct sched_param sched_priority = { .sched_priority = MAX_RT_PRIO-1 };
-	/* Set maximum priority to preempt all other threads on this CPU. */
-	//if (sched_setscheduler_nocheck(current, SCHED_FIFO, &sched_priority))
-	//	pr_warn("Failed to set suspend thread scheduler on CPU %d\n", smp_processor_id());
+	struct spdk_poll_ctx *ctx = container_of(work, struct spdk_poll_ctx, work);
+	unsigned i, ret;
 
-	int i = 0;
-	while (!kthread_should_stop()) {
-		if (ctx->queue_length == 0) {
-			wait_event_interruptible(ctx->wait_queue, ctx->queue_length > 0 || kthread_should_stop());
-			i = 0;
-		}
-		int ret = spdk_nvme_qpair_process_completions(ctx->qpair, 0);
+	for (i = 0; i < 1000 && ctx->queue_length; i++) {
+		ret = spdk_nvme_qpair_process_completions(ctx->qpair, 0);
 		BUG_ON(ret < 0);
-
-		if (i > 1000 && ret == 0) {
-			i = 0;
-			schedule();
-		}
-		i++;
 	}
-	return 0;
+	if (ctx->queue_length) {
+		queue_delayed_work_on(ctx->idx, system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
+	}
 }

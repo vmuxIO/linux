@@ -1,6 +1,8 @@
 #include "dev.h"
 
 #include "linux/slab.h"
+#include "linux/smp.h"
+#include "linux/workqueue.h"
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/kthread.h>
@@ -38,8 +40,6 @@ int dpdk_add(struct dpdk_dev *dev)
 
 	netdev->netdev_ops = &dpdk_netdev_ops;
 
-	skb_queue_head_init(&dpdk->sk_buff);
-
 	ret = register_netdev(netdev);
 
 	if (ret) {
@@ -48,37 +48,23 @@ int dpdk_add(struct dpdk_dev *dev)
 		goto free_netdev;
 	}
 
-	dpdk->n_threads = dpdk_num_queues(dpdk);
-	dpdk->threads = kmalloc_array(dpdk->n_threads, sizeof(*dpdk->threads),
+	dpdk->n_workers = dpdk_num_queues(dpdk);
+	dpdk->poll_contexts = kmalloc_array(dpdk->n_workers, sizeof(*dpdk->poll_contexts),
 				      __GFP_ZERO);
-	if (!dpdk->threads) {
+	if (!dpdk->poll_contexts) {
 		goto unregister_netdev;
 	}
-	for (i = 0; i < dpdk->n_threads; i++) {
-		struct dpdk_thread *thread = &dpdk->threads[i];
-		thread->queue = i;
-		thread->dpdk = dpdk;
-		netif_napi_add(netdev, &thread->napi, NULL, NAPI_POLL_WEIGHT);
-		ret = dpdk_spawn_poll_thread(
-			&thread->thread, (void (*)(void *))(dpdk_poll_thread),
-			thread);
-		if (ret != 0) {
-			printk(KERN_WARNING
-			       "failed to spawn dpdk poll thread\n");
-			goto free_threads;
-		}
+	for (i = 0; i < dpdk->n_workers; i++) {
+		struct dpdk_poll_ctx *ctx = &dpdk->poll_contexts[i];
+		ctx->queue = i;
+		ctx->dpdk = dpdk;
+		netif_napi_add(netdev, &ctx->napi, dpdk_napi, NAPI_POLL_WEIGHT);
+		INIT_DELAYED_WORK(&ctx->work, dpdk_poll_worker);
+		queue_delayed_work_on(i, system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
 	}
 
 	return netdev->ifindex;
 
-free_threads:
-	dpdk->stop_polling = 1;
-	for (i = 0; i < 4; i++) {
-		if (dpdk->threads[i].thread) {
-			dpdk_join_poll_thread(dpdk->threads[i].thread);
-		}
-	}
-	kfree(dpdk->threads);
 unregister_netdev:
 	unregister_netdev(netdev);
 free_netdev:
@@ -92,12 +78,9 @@ void dpdk_remove(struct netdev_dpdk *dev)
 	unregister_netdev(dev->dev);
 	free_netdev(dev->dev);
 
-	dev->stop_polling = 1;
-	for (i = 0; i < dev->n_threads; i++) {
-		if (dev->threads[i].thread) {
-			netif_napi_del(&dev->threads[i].napi);
-			dpdk_join_poll_thread(dev->threads[i].thread);
-		}
+	for (i = 0; i < dev->n_workers; i++) {
+		netif_napi_del(&dev->poll_contexts[i].napi);
+		cancel_delayed_work_sync(&dev->poll_contexts[i].work);
 	}
-	kfree(dev->threads);
+	kfree(dev->poll_contexts);
 }

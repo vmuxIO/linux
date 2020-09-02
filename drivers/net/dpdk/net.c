@@ -1,5 +1,6 @@
 #include "asm/cpu.h"
 #include "asm/smp.h"
+#include "linux/smp.h"
 #include <linux/dpdk.h>
 #include <linux/kdb.h>
 #include <linux/kern_levels.h>
@@ -40,8 +41,8 @@ static int dpdk_open(struct net_device *netdev)
 {
 	struct netdev_dpdk *dpdk = netdev_priv(netdev);
 	unsigned i;
-	for (i = 0; i < dpdk->n_threads; i++) {
-		napi_enable(&dpdk->threads[i].napi);
+	for (i = 0; i < dpdk->n_workers; i++) {
+		napi_enable(&dpdk->poll_contexts[i].napi);
 	}
 	netif_tx_start_all_queues(netdev);
 
@@ -52,8 +53,8 @@ static int dpdk_close(struct net_device *netdev)
 {
 	struct netdev_dpdk *dpdk = netdev_priv(netdev);
 	unsigned i;
-	for (i = 0; i < dpdk->n_threads; i++) {
-		napi_disable(&dpdk->threads[i].napi);
+	for (i = 0; i < dpdk->n_workers; i++) {
+		napi_disable(&dpdk->poll_contexts[i].napi);
 	}
 	netif_tx_stop_all_queues(netdev);
 	dpdk_remove(dpdk);
@@ -225,7 +226,6 @@ static int zero_copy_skb(struct netdev_dpdk *dpdk, struct sk_buff *skb,
 		seg->data_len = skb_frag_size(frag);
 	}
 
-	skb = skb_dequeue(&dpdk->sk_buff);
 	return 0;
 }
 
@@ -244,83 +244,82 @@ static int copy_skb(struct netdev_dpdk *dpdk, struct sk_buff *skb,
 	skb_copy_bits(skb, 0, pkt, skb->len);
 
 free:
-	skb = skb_dequeue(&dpdk->sk_buff);
 	kfree_skb(skb);
 	return res;
 }
 
 extern void i40_print_queue_status(int port_id, int queue_id);
-static netdev_tx_t handle_tx(struct net_device *netdev)
-{
-	struct netdev_dpdk *dpdk = netdev_priv(netdev);
-	struct rte_mbuf *rm;
-	struct sk_buff *skb;
-	int n_tx;
-
-	/* Enter critical section */
-	if (test_and_set_bit(DPDK_SENDING, &dpdk->state))
-		return NETDEV_TX_OK;
-
-	while ((skb = skb_peek(&dpdk->sk_buff)) != NULL) {
-		rm = rte_pktmbuf_alloc(dpdk->txpool);
-		tx_prep(rm, skb);
-
-		if (zero_copy_skb(dpdk, skb, rm) < 0) {
-			printk(KERN_WARNING "dpdk: zero copy failed\n");
-			break;
-		};
-		//if (skb->len > 1000) {
-		//  if (zero_copy_skb(dpdk, skb, rm) < 0) {
-		//    break;
-		//  };
-		//} else {
-		//  if (copy_skb(dpdk, skb, rm) < 0) {
-		//    i40_print_queue_status(dpdk->portid, 0);
-
-		//    int printf(const char* f,...); printf("%s() at %s:%d\n", __func__, __FILE__, __LINE__); __asm__("int3" ::: "memory"); printf("continue\n");
-		//    break;
-		//  };
-		//  if (rm->pkt_len == 0) {
-		//    int printf(const char* f,...); printf("%s() at %s:%d: %u -> %u ?\n", __func__, __FILE__, __LINE__, rm->pkt_len, skb->len);
-		//    BUG_ON(true);
-		//  };
-		//}
-
-		if (unlikely(rte_eth_tx_prepare(dpdk->portid, 0, &rm, 1) !=
-			     1)) {
-			printk(KERN_WARNING "dpdk: tx_prep failed\n");
-			// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
-			//rte_pktmbuf_free(rm);
-			// TODO free skb
-			break;
-		}
-		n_tx = rte_eth_tx_burst(dpdk->portid, 0, &rm, 1);
-		if (unlikely(n_tx != 1)) {
-			printk(KERN_WARNING "dpdk: tx_burst failed\n");
-			// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
-			//rte_pktmbuf_free(rm);
-			// TODO free skb
-		}
-	}
-
-	clear_bit(DPDK_SENDING, &dpdk->state);
-
-	return NETDEV_TX_OK;
-}
 
 static netdev_tx_t dpdk_start_xmit(struct sk_buff *skb,
 				   struct net_device *netdev)
 {
+
 	struct netdev_dpdk *dpdk = netdev_priv(netdev);
+	struct rte_mbuf *rm;
+	int n_tx;
+	int qid = skb_get_queue_mapping(skb);
+	struct netdev_queue *txq = netdev_get_tx_queue(netdev, qid);
 
-	skb_queue_tail(&dpdk->sk_buff, skb);
+	/*  Determine which tx ring we will be placed on */
 
-	return handle_tx(netdev);
+	rm = rte_pktmbuf_alloc(dpdk->txpool);
+	tx_prep(rm, skb);
+
+	if (zero_copy_skb(dpdk, skb, rm) < 0) {
+		printk(KERN_WARNING "dpdk: zero copy failed\n");
+		return NETDEV_TX_OK;
+	};
+
+	//if (skb->len > 1000) {
+	//  if (zero_copy_skb(dpdk, skb, rm) < 0) {
+	//    break;
+	//  };
+	//} else {
+	//  if (copy_skb(dpdk, skb, rm) < 0) {
+	//    i40_print_queue_status(dpdk->portid, 0);
+
+	//    int printf(const char* f,...); printf("%s() at %s:%d\n", __func__, __FILE__, __LINE__); __asm__("int3" ::: "memory"); printf("continue\n");
+	//    break;
+	//  };
+	//  if (rm->pkt_len == 0) {
+	//    int printf(const char* f,...); printf("%s() at %s:%d: %u -> %u ?\n", __func__, __FILE__, __LINE__, rm->pkt_len, skb->len);
+	//    BUG_ON(true);
+	//  };
+	//}
+	int printf(const char* f,...); printf("\033[31;1m%s() at %s:%d: %d\033[0m\n", __func__, __FILE__, __LINE__, qid);
+
+	if (unlikely(rte_eth_tx_prepare(dpdk->portid, qid, &rm, 1) !=
+				 1)) {
+		printk(KERN_WARNING "dpdk: tx_prep failed\n");
+		// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
+		//rte_pktmbuf_free(rm);
+		// TODO free skb
+		return NETDEV_TX_OK;
+	}
+	n_tx = rte_eth_tx_burst(dpdk->portid, 0, &rm, 1);
+	if (unlikely(n_tx != 1)) {
+		printk(KERN_WARNING "dpdk: tx_burst failed\n");
+		// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
+		//rte_pktmbuf_free(rm);
+		// TODO free skb
+		return NETDEV_TX_OK;
+	}
+	netdev_tx_sent_queue(txq, skb->len);
+
+	return NETDEV_TX_OK;
+}
+
+static u16 dpdk_select_queue(struct net_device *ndev, struct sk_buff *skb,
+				void *accel_priv,
+				select_queue_fallback_t fallback)
+{
+	return (u16)smp_processor_id();
 }
 
 struct net_device_ops dpdk_netdev_ops = {
 	.ndo_open = dpdk_open,
 	.ndo_stop = dpdk_close,
+	.ndo_select_queue = dpdk_select_queue,
 	.ndo_start_xmit = dpdk_start_xmit,
 };
 
@@ -380,29 +379,19 @@ static void trace_calls_print_with_queue(struct trace_data *t)
 	ctx->counter++;
 }
 
-static unsigned dpdk_queue_i = 0;
-
-static void dpdk_rx_poll(struct netdev_dpdk *dpdk, struct napi_struct *napi,
-			 int queue)
-//int queue, struct trace_context *ctx)
+static void dpdk_rx_poll(struct dpdk_poll_ctx *ctx)
 {
 	// burst receive context by rump dpdk code
 	uint16_t i;
-	struct rte_mbuf **rcv_mbuf = dpdk->threads[queue].rcv_mbuf;
+	struct netdev_dpdk *dpdk = ctx->dpdk;
+	struct rte_mbuf **rcv_mbuf = ctx->rcv_mbuf;
 	while (1) {
-		uint16_t nb_rx = rte_eth_rx_burst(dpdk->portid, queue, rcv_mbuf,
+		uint16_t nb_rx = rte_eth_rx_burst(dpdk->portid, ctx->queue, rcv_mbuf,
 						  MAX_PKT_BURST);
 
 		if (nb_rx == 0) {
 			return;
 		}
-
-		//{
-		//  struct trace_data __attribute__((__cleanup__(trace_calls_print_with_queue))) __trace_data = {
-		//    .ctx = ctx,
-		//    .cycles = lkl_get_current_cpu(),
-		//  };
-		//}
 
 		for (i = 0; i < nb_rx; i++) {
 			struct rte_mbuf *rm = rcv_mbuf[i];
@@ -419,45 +408,27 @@ static void dpdk_rx_poll(struct netdev_dpdk *dpdk, struct napi_struct *napi,
 			// This currently makes performance worse...
 			//set_rx_hash(m, skb);
 
-			napi_gro_receive(napi, skb);
+			napi_gro_receive(&ctx->napi, skb);
 			dpdk_log_skb(skb);
 
 			rte_pktmbuf_free(rm);
 		}
 
-		napi_gro_flush(napi, false);
+		napi_gro_flush(&ctx->napi, false);
 	}
 }
 
-void spdk_yield_thread(void);
-extern int lkl_max_cpu_no;
-
-int dpdk_poll_thread(void *arg)
+int dpdk_napi(struct napi_struct *napi, const int budget)
 {
-	struct dpdk_thread *thread = arg;
-	int *polling = &thread->dpdk->stop_polling;
-	//struct trace_context __trace_ctx_2 = {
-	//	.start_cycles = 0,
-	//	.counter = 1,
-	//	.frequency = 3000000000,
-	//	.function = __func__,
-	//	.filename = __FILE__,
-	//	.line = __LINE__,
-	//};
+	struct dpdk_poll_ctx *ctx = container_of(napi, struct dpdk_poll_ctx, napi);
+	dpdk_rx_poll(ctx);
+}
 
-	unsigned cpu = ((thread->queue + 1) % lkl_max_cpu_no);
-	// bind each queue to a different cpu
-	lkl_set_current_cpu(cpu);
-
-	while (!*polling) {
-		lkl_cpu_get();
-		dpdk_rx_poll(thread->dpdk, &thread->napi, thread->queue);
-		//dpdk_rx_poll(thread->dpdk, &thread->napi, thread->queue, &__trace_ctx_2);
-		lkl_cpu_put();
-		spdk_yield_thread();
-	}
-
-	return 0;
+void dpdk_poll_worker(struct work_struct *work)
+{
+	struct dpdk_poll_ctx *ctx = container_of(work, struct dpdk_poll_ctx, work);
+	dpdk_rx_poll(ctx);
+	queue_delayed_work_on(smp_processor_id(), system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
 }
 
 int dpdk_num_queues(struct netdev_dpdk *dev)

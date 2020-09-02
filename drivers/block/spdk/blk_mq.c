@@ -64,7 +64,7 @@ static blk_status_t spdk_queue_rq(struct blk_mq_hw_ctx *hctx,
 	} while (r > 0);
 
 	if (ctx->queue_length) {
-		wake_up_interruptible(&ctx->wait_queue);
+		queue_delayed_work_on(ctx->idx, system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
 	}
 
 	return status;
