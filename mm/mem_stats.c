@@ -205,10 +205,20 @@ static int slab_show(void)
 }
 
 void dump_memory_stats(void) {
-  slab_show();
-  meminfo_proc_show();
+	slab_show();
+	meminfo_proc_show();
 
 	nodemask_t mask;
 	init_nodemask_of_node(&mask, DMA_ZONE_SGX|DMA_ZONE_SPDK|DMA_ZONE_DPDK);
 	show_free_areas(0, &mask);
+}
+
+void dump_memory_stats_small(void) {
+	slab_show();
+#define K(x) ((x) << (PAGE_SHIFT-10))
+	struct zone *zone;
+	for_each_populated_zone(zone) {
+		printk(KERN_CONT "sgx free:%lukB\n", K(zone_page_state(zone, NR_FREE_PAGES)));
+		break;
+	}
 }
