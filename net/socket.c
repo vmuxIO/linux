@@ -1130,8 +1130,8 @@ static __poll_t sock_poll(struct file *file, poll_table *wait)
 		busy_flag = POLL_BUSY_LOOP;
 
 		/* once, only if requested by syscall */
-		if (wait && (wait->_key & POLL_BUSY_LOOP))
-			sk_busy_loop(sock->sk, 1);
+		//if (wait && (wait->_key & POLL_BUSY_LOOP))
+		sk_busy_loop(sock->sk, 1);
 	}
 
 	return busy_flag | sock->ops->poll(file, sock, wait);
