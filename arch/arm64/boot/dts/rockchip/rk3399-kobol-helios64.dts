@@ -1153,3 +1153,11 @@
 &vopl_mmu {
 	status = "okay";
 };
+
+&cluster0_opp {
+	/delete-node/ opp06;
+};
+
+&cluster1_opp {
+	/delete-node/ opp08;
+};
