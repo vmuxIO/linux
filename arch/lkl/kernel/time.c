@@ -1,3 +1,5 @@
+#include <linux/irqreturn.h>
+#include <linux/smp.h>
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>
 #include <linux/jiffies.h>
@@ -122,6 +124,8 @@ static struct irqaction irq0  = {
 static char clockevent_names[NR_CPUS][CLOCKEVENT_NAMELEN];
 static struct clock_event_device clockevent_loc[NR_CPUS];
 
+static DEFINE_MUTEX(timer_init_mutex);
+static int timer_started = 0;
 void lkl_cpu_clock_init(int cpu)
 {
 	struct clock_event_device *ce = &clockevent_loc[cpu];
@@ -134,6 +138,16 @@ void lkl_cpu_clock_init(int cpu)
 	ce->cpumask = cpumask_of(cpu);
 	tick_broadcast_control(TICK_BROADCAST_ON);
 	clockevents_config_and_register(ce, HZ, 1, ULONG_MAX);
+
+	mutex_lock(&timer_init_mutex);
+	// This is a bit hacky: we need at least one TICK_BROADCAST_ON for
+	// `clockevent` to be initialized correctly and we can safely use our timer
+	// interrupt
+	if (!timer_started) {
+		lkl_ops->timer_start(timer);
+		timer_started = 1;
+	}
+	mutex_unlock(&timer_init_mutex);
 }
 
 void __init time_init(void)
@@ -141,15 +155,10 @@ void __init time_init(void)
 	struct cpumask zero;
 	int ret;
 
-	if (!lkl_ops->timer_alloc || !lkl_ops->timer_free || !!lkl_ops->time) {
+	if (!lkl_ops->timer_alloc || !lkl_ops->timer_free || !lkl_ops->time) {
 		pr_err("lkl: no time or timer support provided by host\n");
 		return;
 	}
-
-	timer = lkl_ops->timer_alloc(timer_fn, NULL);
-
-	if (!timer)
-		pr_err("lkl: unable to allocate timer");
 
 	timer_irq = lkl_get_free_irq("timer");
 	setup_irq(timer_irq, &irq0);
@@ -163,5 +172,10 @@ void __init time_init(void)
 	clockevents_config_and_register(&clockevent, HZ, 0, 0);
 
 	boot_time = lkl_ops->time();
+
+	timer = lkl_ops->timer_alloc(timer_fn, NULL);
+
+	if (!timer)
+		pr_err("lkl: unable to allocate timer");
 	pr_info("lkl: time and timers initialized (irq%d)\n", timer_irq);
 }
