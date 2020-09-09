@@ -84,15 +84,6 @@ static int clockevent_set_state_shutdown(struct clock_event_device *evt)
 	return 0;
 }
 
-static int clockevent_set_state_oneshot(struct clock_event_device *evt)
-{
-	timer = lkl_ops->timer_alloc(timer_fn, NULL);
-	if (!timer)
-		return -ENOMEM;
-
-	return 0;
-}
-
 static irqreturn_t timer_irq_handler(int irq, void *dev_id)
 {
 	struct clock_event_device *dev = (struct clock_event_device *)dev_id;
@@ -100,12 +91,6 @@ static irqreturn_t timer_irq_handler(int irq, void *dev_id)
 	dev->event_handler(dev);
 
 	return IRQ_HANDLED;
-}
-
-static int clockevent_next_event(unsigned long ns,
-				 struct clock_event_device *evt)
-{
-	return lkl_ops->timer_set_oneshot(timer, ns);
 }
 
 static void clockevent_broadcast(const struct cpumask *mask)
@@ -120,12 +105,10 @@ static void clockevent_broadcast(const struct cpumask *mask)
 }
 
 static struct clock_event_device clockevent = {
-	.name			= "lkl",
-	.features		= CLOCK_EVT_FEAT_ONESHOT,
-	.set_state_oneshot	= clockevent_set_state_oneshot,
-	.set_next_event		= clockevent_next_event,
-	.set_state_shutdown	= clockevent_set_state_shutdown,
-	.broadcast		= clockevent_broadcast,
+	.name = "lkl",
+	.features = CLOCK_EVT_FEAT_PERIODIC,
+	.broadcast = clockevent_broadcast,
+	.set_state_shutdown = clockevent_set_state_shutdown,
 };
 
 static struct irqaction irq0  = {
@@ -150,7 +133,7 @@ void lkl_cpu_clock_init(int cpu)
 
 	ce->cpumask = cpumask_of(cpu);
 	tick_broadcast_control(TICK_BROADCAST_ON);
-	clockevents_config_and_register(ce, NSEC_PER_SEC, 1, ULONG_MAX);
+	clockevents_config_and_register(ce, HZ, 1, ULONG_MAX);
 }
 
 void __init time_init(void)
@@ -158,11 +141,15 @@ void __init time_init(void)
 	struct cpumask zero;
 	int ret;
 
-	if (!lkl_ops->timer_alloc || !lkl_ops->timer_free ||
-	    !lkl_ops->timer_set_oneshot || !lkl_ops->time) {
+	if (!lkl_ops->timer_alloc || !lkl_ops->timer_free || !!lkl_ops->time) {
 		pr_err("lkl: no time or timer support provided by host\n");
 		return;
 	}
+
+	timer = lkl_ops->timer_alloc(timer_fn, NULL);
+
+	if (!timer)
+		pr_err("lkl: unable to allocate timer");
 
 	timer_irq = lkl_get_free_irq("timer");
 	setup_irq(timer_irq, &irq0);
@@ -173,7 +160,7 @@ void __init time_init(void)
 
 	cpumask_clear(&zero);
 	clockevent.cpumask = &zero;
-	clockevents_config_and_register(&clockevent, NSEC_PER_SEC, 1, ULONG_MAX);
+	clockevents_config_and_register(&clockevent, HZ, 0, 0);
 
 	boot_time = lkl_ops->time();
 	pr_info("lkl: time and timers initialized (irq%d)\n", timer_irq);
