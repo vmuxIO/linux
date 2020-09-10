@@ -121,11 +121,10 @@ static struct irqaction irq0  = {
 };
 
 #define CLOCKEVENT_NAMELEN	64
+#define CLOCK_FREQ 1000
 static char clockevent_names[NR_CPUS][CLOCKEVENT_NAMELEN];
 static struct clock_event_device clockevent_loc[NR_CPUS];
 
-static DEFINE_MUTEX(timer_init_mutex);
-static int timer_started = 0;
 void lkl_cpu_clock_init(int cpu)
 {
 	struct clock_event_device *ce = &clockevent_loc[cpu];
@@ -137,17 +136,12 @@ void lkl_cpu_clock_init(int cpu)
 
 	ce->cpumask = cpumask_of(cpu);
 	tick_broadcast_control(TICK_BROADCAST_ON);
-	clockevents_config_and_register(ce, HZ, 1, ULONG_MAX);
+	// timer goes of once per 1ms
+	clockevents_config_and_register(ce, CLOCK_FREQ, 1, ULONG_MAX);
+}
 
-	mutex_lock(&timer_init_mutex);
-	// This is a bit hacky: we need at least one TICK_BROADCAST_ON for
-	// `clockevent` to be initialized correctly and we can safely use our timer
-	// interrupt
-	if (!timer_started) {
-		lkl_ops->timer_start(timer);
-		timer_started = 1;
-	}
-	mutex_unlock(&timer_init_mutex);
+void smp_cpus_done(unsigned int max_cpus) {
+	lkl_ops->timer_start(timer);
 }
 
 void __init time_init(void)
@@ -169,7 +163,7 @@ void __init time_init(void)
 
 	cpumask_clear(&zero);
 	clockevent.cpumask = &zero;
-	clockevents_config_and_register(&clockevent, HZ, 0, 0);
+	clockevents_config_and_register(&clockevent, CLOCK_FREQ, 0, 0);
 
 	boot_time = lkl_ops->time();
 

@@ -12,7 +12,7 @@ extern void smp_prepare_cpus(unsigned int max_cpus);
 
 extern int __cpu_up(unsigned int cpu, struct task_struct *idle);
 static inline void smp_send_stop(void) { }
-static inline void smp_cpus_done(unsigned int max_cpus) { }
+void smp_cpus_done(unsigned int max_cpus);
 
 extern void smp_send_reschedule(int cpu);
 extern void arch_send_call_function_single_ipi(int cpu);
