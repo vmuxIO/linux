@@ -10,6 +10,6 @@ void dpdk_set_mac(int portid, struct net_device *netdev);
 void dpdk_initialize_skb_function(void);
 int dpdk_napi(struct napi_struct *napi, const int budget);
 void dpdk_poll_worker(struct work_struct *work);
-int dpdk_num_queues(struct netdev_dpdk *dev);
+int dpdk_num_rx_queues(struct netdev_dpdk *dev);
 
 #endif

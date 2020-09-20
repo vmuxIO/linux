@@ -5,7 +5,10 @@ void set_static_arp(void)
 {
 	struct net *net;
 	struct arpreq req = {};
-	char mac[6] = { 0x3c, 0xfd, 0xfe, 0x9e, 0x97, 0x58 };
+	// 3c:fd:fe:b5:22:99
+	//char mac[6] = { 0x3c, 0xfd, 0xfe, 0x9e, 0x97, 0x58 };
+	// 10.0.42.2/24
+	char mac[6] = { 0x3c, 0xfd, 0xfe, 0xb5, 0x22, 0x99 };
 	char *iface = "dpdk0";
 
 	req.arp_flags = ATF_PERM;
@@ -13,7 +16,7 @@ void set_static_arp(void)
 	req.arp_pa.sa_family = AF_INET;
 
 	((struct sockaddr_in *)&req.arp_pa)->sin_addr.s_addr =
-		in_aton("10.0.2.2");
+		in_aton("10.0.42.2");
 
 	printk(KERN_INFO "%s() at %s:%d: set mac address\n", __func__, __FILE__,
 	       __LINE__);

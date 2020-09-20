@@ -48,7 +48,7 @@ int dpdk_add(struct dpdk_dev *dev)
 		goto free_netdev;
 	}
 
-	dpdk->n_workers = dpdk_num_queues(dpdk);
+	dpdk->n_workers = dpdk_num_rx_queues(dpdk);
 	dpdk->poll_contexts = kmalloc_array(dpdk->n_workers, sizeof(*dpdk->poll_contexts),
 				      __GFP_ZERO);
 	if (!dpdk->poll_contexts) {

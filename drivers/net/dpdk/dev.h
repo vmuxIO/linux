@@ -18,7 +18,6 @@ struct dpdk_poll_ctx {
 	int queue;
 	struct netdev_dpdk *dpdk;
 	struct napi_struct napi;
-	struct rte_mbuf *rcv_mbuf[MAX_PKT_BURST];
 };
 
 struct netdev_dpdk {
@@ -28,6 +27,8 @@ struct netdev_dpdk {
 	int stop_polling;
 
 	int portid;
+	unsigned long state;
+	struct rte_mbuf *rcv_mbuf[MAX_PKT_BURST];
 
 	struct rte_mempool *txpool; /* ring buffer pool */
 };

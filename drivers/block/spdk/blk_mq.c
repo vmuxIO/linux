@@ -1,6 +1,7 @@
 #include "blk_mq.h"
 
-#include "linux/smp.h"
+#include <linux/smp.h>
+#include <linux/swap.h>
 #include <linux/bvec.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
@@ -61,12 +62,14 @@ static blk_status_t spdk_queue_rq(struct blk_mq_hw_ctx *hctx,
 	}
 	do {
 		r = spdk_nvme_qpair_process_completions(ctx->qpair, 0);
-	} while (r > 0);
+	} while (r > 0 && ctx->queue_length);
 
 	if (ctx->queue_length) {
-		queue_delayed_work_on(ctx->idx, system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
-	}
+		//void dump_memory_stats(void);
+		//dump_memory_stats();
 
+		queue_delayed_work_on(ctx->idx, system_wq, &ctx->work, 10);
+	}
 	return status;
 }
 

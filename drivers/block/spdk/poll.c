@@ -306,6 +306,6 @@ void spdk_poll_worker(struct work_struct *work)
 		BUG_ON(ret < 0);
 	}
 	if (ctx->queue_length) {
-		queue_delayed_work_on(ctx->idx, system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
+		queue_delayed_work_on(ctx->idx, system_wq, &ctx->work, 0);
 	}
 }

@@ -1,6 +1,4 @@
-#include "asm/cpu.h"
-#include "asm/smp.h"
-#include "linux/smp.h"
+#include <linux/workqueue.h>
 #include <linux/dpdk.h>
 #include <linux/kdb.h>
 #include <linux/kern_levels.h>
@@ -34,8 +32,8 @@
 // avoid include spdk header, which causes conflicts with Linux's headers
 uint64_t spdk_vtophys(void *buf, uint64_t *size);
 
-#define DPDK_SENDING 1 /* Bit 1 = 0x02*/
 //#define DPDK_DEBUG
+#define DPDK_RECEIVING 1
 
 static int dpdk_open(struct net_device *netdev)
 {
@@ -45,6 +43,7 @@ static int dpdk_open(struct net_device *netdev)
 		napi_enable(&dpdk->poll_contexts[i].napi);
 	}
 	netif_tx_start_all_queues(netdev);
+	//netif_carrier_on(netdev);
 
 	return 0;
 }
@@ -62,23 +61,9 @@ static int dpdk_close(struct net_device *netdev)
 }
 
 #ifdef DPDK_DEBUG
-static void dpdk_log_skb(struct sk_buff *skb)
-{
-	int printf(const char *f, ...);
-	do {
-		int i;
-		printf("\n");
-		printf("000000 ");
-		for (i = 0; i < skb->len; i++) {
-			printf("%02x ", ((u8 *)skb->data)[i]);
-			if (15 == i % 16)
-				printf("\n%06x ", (i + 1));
-		}
-		printf("\n");
-	} while (0);
-}
+#include "log.h"
 #else
-static void dpdk_log_skb(struct sk_buff *skb)
+static void dpdk_log_skb(const char *prefix, const struct sk_buff *skb)
 {
 }
 #endif
@@ -180,6 +165,7 @@ int dpdk_attach_skb(struct rte_mbuf *rm)
 	if (!skb) {
 		return -ENOMEM;
 	}
+
 	rm->userdata = skb;
 	rte_pktmbuf_attach_extbuf(rm, skb->data, spdk_vtophys(skb->data, NULL),
 				  size, &dpdk_frag_shinfo);
@@ -258,13 +244,13 @@ static netdev_tx_t dpdk_start_xmit(struct sk_buff *skb,
 	struct rte_mbuf *rm;
 	int n_tx;
 	int qid = skb_get_queue_mapping(skb);
-	struct netdev_queue *txq = netdev_get_tx_queue(netdev, qid);
 
 	/*  Determine which tx ring we will be placed on */
 
 	rm = rte_pktmbuf_alloc(dpdk->txpool);
 	tx_prep(rm, skb);
 
+	//int printf(const char* f,...); printf("%s() at %s:%d\n", __func__, __FILE__, __LINE__); __asm__("int3; nop" ::: "memory");
 	if (zero_copy_skb(dpdk, skb, rm) < 0) {
 		printk(KERN_WARNING "dpdk: zero copy failed\n");
 		return NETDEV_TX_OK;
@@ -286,17 +272,19 @@ static netdev_tx_t dpdk_start_xmit(struct sk_buff *skb,
 	//    BUG_ON(true);
 	//  };
 	//}
-	int printf(const char* f,...); printf("\033[31;1m%s() at %s:%d: %d\033[0m\n", __func__, __FILE__, __LINE__, qid);
+	//void dump_memory_stats(void);
+	//dump_memory_stats();
+	dpdk_log_skb("tx", skb);
 
-	if (unlikely(rte_eth_tx_prepare(dpdk->portid, qid, &rm, 1) !=
-				 1)) {
+	if (unlikely(rte_eth_tx_prepare(dpdk->portid, qid, &rm, 1) != 1)) {
 		printk(KERN_WARNING "dpdk: tx_prep failed\n");
 		// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
 		//rte_pktmbuf_free(rm);
 		// TODO free skb
 		return NETDEV_TX_OK;
 	}
-	n_tx = rte_eth_tx_burst(dpdk->portid, 0, &rm, 1);
+	// TODO actual use other queues
+	n_tx = rte_eth_tx_burst(dpdk->portid, qid, &rm, 1);
 	if (unlikely(n_tx != 1)) {
 		printk(KERN_WARNING "dpdk: tx_burst failed\n");
 		// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
@@ -304,7 +292,7 @@ static netdev_tx_t dpdk_start_xmit(struct sk_buff *skb,
 		// TODO free skb
 		return NETDEV_TX_OK;
 	}
-	netdev_tx_sent_queue(txq, skb->len);
+	//netdev_tx_sent_queue(txq, skb->len);
 
 	return NETDEV_TX_OK;
 }
@@ -327,6 +315,7 @@ void dpdk_set_mac(int portid, struct net_device *netdev)
 {
 	rte_eth_macaddr_get(portid, (struct ether_addr *)netdev->dev_addr);
 	ether_addr_copy(netdev->perm_addr, netdev->dev_addr);
+	printk(KERN_INFO "[dpdk] dpdk%d: mac address %pM\n", netdev->ifindex, netdev->dev_addr);
 }
 
 static void set_rx_hash(struct rte_mbuf *rm, struct sk_buff *skb)
@@ -378,19 +367,36 @@ static void trace_calls_print_with_queue(struct trace_data *t)
 	// FIXME: not thread-safe
 	ctx->counter++;
 }
+static int dpdk_counter = 0;
 
-static void dpdk_rx_poll(struct dpdk_poll_ctx *ctx)
+int i40_clean_queue(int port_id, int queue_id);
+static unsigned dpdk_rx_poll(struct dpdk_poll_ctx *ctx)
 {
-	// burst receive context by rump dpdk code
 	uint16_t i;
+	unsigned work_done;
+
+	// burst receive context by rump dpdk code
 	struct netdev_dpdk *dpdk = ctx->dpdk;
-	struct rte_mbuf **rcv_mbuf = ctx->rcv_mbuf;
+	struct rte_mbuf **rcv_mbuf = dpdk->rcv_mbuf;
+	/* Enter critical section */
+	if (test_and_set_bit(DPDK_RECEIVING, &dpdk->state)) {
+		return 0;
+	}
+
+	//for (i = 0; i < 2; i++) {
+	//	i40_clean_queue(ctx->dpdk->portid, i);
+	//}
+
 	while (1) {
-		uint16_t nb_rx = rte_eth_rx_burst(dpdk->portid, ctx->queue, rcv_mbuf,
-						  MAX_PKT_BURST);
+		uint16_t nb_rx = rte_eth_rx_burst(dpdk->portid,
+										  ctx->queue,
+										  rcv_mbuf,
+										  MAX_PKT_BURST);
 
 		if (nb_rx == 0) {
-			return;
+			napi_gro_flush(&ctx->napi, false);
+			clear_bit(DPDK_RECEIVING, &dpdk->state);
+			return work_done;
 		}
 
 		for (i = 0; i < nb_rx; i++) {
@@ -399,6 +405,7 @@ static void dpdk_rx_poll(struct dpdk_poll_ctx *ctx)
 			struct sk_buff *skb = rm->userdata;
 
 			skb->len = len;
+			work_done += len;
 			skb_set_tail_pointer(skb, skb->len);
 			skb->dev = dpdk->dev;
 			skb->protocol = eth_type_trans(skb, dpdk->dev);
@@ -408,30 +415,44 @@ static void dpdk_rx_poll(struct dpdk_poll_ctx *ctx)
 			// This currently makes performance worse...
 			//set_rx_hash(m, skb);
 
+			dpdk_log_skb("rx", skb);
+			if (!skb) {
+				int printf(const char* f,...); printf("%s() at %s:%d\n", __func__, __FILE__, __LINE__); __asm__("int3; nop" ::: "memory");
+			}
 			napi_gro_receive(&ctx->napi, skb);
-			dpdk_log_skb(skb);
 
 			rte_pktmbuf_free(rm);
 		}
 
-		napi_gro_flush(&ctx->napi, false);
+		//if (dpdk_counter % 10000 == 0) {
+		//	int printf(const char* f,...); printf("\033[31;1m%s() at %s:%d: queue %u\033[0m\n", __func__, __FILE__, __LINE__, ctx->queue);
+		//}
 	}
 }
 
 int dpdk_napi(struct napi_struct *napi, const int budget)
 {
+	unsigned work_done;
 	struct dpdk_poll_ctx *ctx = container_of(napi, struct dpdk_poll_ctx, napi);
-	dpdk_rx_poll(ctx);
+	return dpdk_rx_poll(ctx);
 }
 
 void dpdk_poll_worker(struct work_struct *work)
 {
 	struct dpdk_poll_ctx *ctx = container_of(work, struct dpdk_poll_ctx, work);
 	dpdk_rx_poll(ctx);
-	queue_delayed_work_on(smp_processor_id(), system_highpri_wq, &ctx->work, msecs_to_jiffies(10));
+	queue_delayed_work_on(smp_processor_id(), system_highpri_wq, &ctx->work, msecs_to_jiffies(100));
+	dpdk_counter++;
+	if (dpdk_counter % 1000 == 0) {
+		int printf(const char* f,...); printf("\033[31;1m%s() at %s:%d\033[0m\n", __func__, __FILE__, __LINE__);
+		//void i40_clean_queue(int port_id, int queue_id);
+		//i40_clean_queue(ctx->dpdk->portid, ctx->queue);
+		i40_print_queue_status(ctx->dpdk->portid, ctx->queue);
+	}
+
 }
 
-int dpdk_num_queues(struct netdev_dpdk *dev)
+int dpdk_num_rx_queues(struct netdev_dpdk *dev)
 {
 	struct rte_eth_dev_info dev_info;
 
