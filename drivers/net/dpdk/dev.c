@@ -66,7 +66,7 @@ int dpdk_add(struct dpdk_dev *dev)
 		struct dpdk_thread *thread = &dpdk->threads[i];
 		thread->queue = i;
 		thread->dpdk = dpdk;
-		netif_napi_add(netdev, &thread->napi, NULL, NAPI_POLL_WEIGHT);
+		netif_napi_add(netdev, &thread->napi, dpdk_napi_poll, NAPI_POLL_WEIGHT);
 		ret = dpdk_spawn_poll_thread(
 			&thread->thread, (void (*)(void *))(dpdk_poll_thread),
 			thread);

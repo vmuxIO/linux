@@ -38,9 +38,11 @@ uint64_t spdk_vtophys(void *buf, uint64_t *size);
 
 extern int sgxlkl_dpdk_zerocopy;
 
+static struct netdev_dpdk *this_dpdk;
 static int dpdk_open(struct net_device *netdev)
 {
 	struct netdev_dpdk *dpdk = netdev_priv(netdev);
+	this_dpdk = dpdk;
 	unsigned i;
 	for (i = 0; i < dpdk->n_threads; i++) {
 		napi_enable(&dpdk->threads[i].napi);
@@ -177,7 +179,13 @@ static struct rte_mbuf_ext_shared_info dpdk_frag_shinfo = {
 int dpdk_attach_skb(struct rte_mbuf *rm)
 {
 	size_t size = 1500; // FIXME: MTU
-	struct sk_buff *skb = dev_alloc_skb(size);
+	struct sk_buff *skb;
+	// evil optimization. this is slightly faster
+	if (likely(this_dpdk)) {
+		skb = napi_alloc_skb(&this_dpdk->threads[0].napi, size);
+	} else {
+		skb = dev_alloc_skb(size);
+	}
 	if (!skb) {
 		return -ENOMEM;
 	}
@@ -442,6 +450,12 @@ static void dpdk_rx_poll(struct netdev_dpdk *dpdk, struct napi_struct *napi,
 void spdk_yield_thread(void);
 extern int lkl_max_cpu_no;
 
+int dpdk_napi_poll(struct napi_struct *napi, const int budget) {
+	struct dpdk_thread *t = container_of(napi, struct dpdk_thread, napi);
+	dpdk_rx_poll(t->dpdk, &t->napi, t->queue);
+	return 0;
+}
+
 int dpdk_poll_thread(void *arg)
 {
 	struct dpdk_thread *thread = arg;
@@ -455,7 +469,7 @@ int dpdk_poll_thread(void *arg)
 	//	.line = __LINE__,
 	//};
 
-	unsigned cpu = ((thread->queue + 1) % lkl_max_cpu_no);
+	unsigned cpu = ((thread->queue) % lkl_max_cpu_no);
 	// bind each queue to a different cpu
 	lkl_set_current_cpu(cpu);
 
