@@ -160,6 +160,28 @@ static int spdk_read_copy(struct spdk_cmd *cmd, struct request *req,
 		return rc;
 	}
 }
+static int spdk_read(struct spdk_cmd *cmd, struct request *req,
+					 uint64_t lba, uint32_t lba_count)
+{
+	struct bio_vec bvec;
+	struct req_iterator iter;
+	int zerocopy = 1;
+	rq_for_each_segment (bvec, cmd->req, iter) {
+		// Copying from bv_page would not work in systems with MMU.
+		// However in lkl memory is always mapped.
+		unsigned long addr = (unsigned long)page_address(bvec.bv_page);
+		if (addr > spdk_dma_memory_end ||
+		    addr < spdk_dma_memory_begin) {
+			zerocopy = 0;
+			break;
+		}
+	}
+	if (zerocopy && sgxlkl_spdk_zerocopy) {
+		spdk_read_zerocopy(cmd, req, lba, lba_count);
+	} else {
+		spdk_read_copy(cmd, req, lba, lba_count);
+	}
+}
 
 // This code runs in userspace
 static void spdk_write_completion_cb(void *ctx, const struct spdk_nvme_cpl *cpl)
@@ -248,12 +270,13 @@ static int spdk_write(struct spdk_cmd *cmd, struct request *rq, uint64_t lba,
 		}
 	}
 
-	if (zerocopy) {
+	if (zerocopy && sgxlkl_spdk_zerocopy) {
 		return spdk_write_zerocopy(cmd, rq, lba, lba_count);
 	} else {
 		return spdk_write_copy(cmd, rq, lba, lba_count);
 	}
 }
+
 
 void spdk_process_request(struct request *rq, struct spdk_poll_ctx *ctx)
 {
@@ -287,11 +310,7 @@ void spdk_process_request(struct request *rq, struct spdk_poll_ctx *ctx)
 	//	//return spdk_discard();
 	//	//break;
 	case REQ_OP_READ:
-		//spdk_read(cmd, rq, lba, lba_count);
-		if(sgxlkl_spdk_zerocopy)
-			spdk_read_zerocopy(cmd, rq, lba, lba_count);
-		else
-			spdk_read_copy(cmd, rq, lba, lba_count);
+		spdk_read(cmd, rq, lba, lba_count);
 		break;
 	case REQ_OP_WRITE:
 		spdk_write(cmd, rq, lba, lba_count);
