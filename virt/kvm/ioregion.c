@@ -3,6 +3,7 @@
 #include <linux/fs.h>
 #include <kvm/iodev.h>
 #include "eventfd.h"
+#include <uapi/linux/ioregion.h>
 
 void
 kvm_ioregionfd_init(struct kvm *kvm)
@@ -40,18 +41,175 @@ ioregion_release(struct ioregion *p)
 	kfree(p);
 }
 
+static bool
+pack_cmd(struct ioregionfd_cmd *cmd, u64 offset, u64 len, u8 opt, u8 resp,
+	 u64 user_data, const void *val)
+{
+	switch (len) {
+	case 0:
+		break;
+	case 1:
+		cmd->size_exponent = IOREGIONFD_SIZE_8BIT;
+		break;
+	case 2:
+		cmd->size_exponent = IOREGIONFD_SIZE_16BIT;
+		break;
+	case 4:
+		cmd->size_exponent = IOREGIONFD_SIZE_32BIT;
+		break;
+	case 8:
+		cmd->size_exponent = IOREGIONFD_SIZE_64BIT;
+		break;
+	default:
+		return false;
+	}
+
+	if (val)
+		memcpy(&cmd->data, val, len);
+	cmd->user_data = user_data;
+	cmd->offset = offset;
+	cmd->cmd = opt;
+	cmd->resp = resp;
+
+	return true;
+}
+
+enum {
+	SEND_CMD,
+	GET_REPLY,
+	COMPLETE
+};
+
+static void
+ioregion_save_ctx(struct kvm_vcpu *vcpu, bool in, gpa_t addr, u8 state, void *val)
+{
+	vcpu->ioregion_ctx.is_interrupted = true;
+	vcpu->ioregion_ctx.val = val;
+	vcpu->ioregion_ctx.state = state;
+	vcpu->ioregion_ctx.addr = addr;
+	vcpu->ioregion_ctx.in = in;
+}
+
 static int
 ioregion_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
 	      int len, void *val)
 {
-	return -EOPNOTSUPP;
+	struct ioregion *p = to_ioregion(this);
+	union {
+		struct ioregionfd_cmd cmd;
+		struct ioregionfd_resp resp;
+	} buf;
+	int ret = 0;
+	int state = SEND_CMD;
+
+	if (unlikely(vcpu->ioregion_ctx.is_interrupted)) {
+		vcpu->ioregion_ctx.is_interrupted = false;
+
+		switch (vcpu->ioregion_ctx.state) {
+		case SEND_CMD:
+			goto send_cmd;
+		case GET_REPLY:
+			goto get_repl;
+		default:
+			return -EINVAL;
+		}
+	}
+
+send_cmd:
+	memset(&buf, 0, sizeof(buf));
+	if (!pack_cmd(&buf.cmd, addr - p->paddr, len, IOREGIONFD_CMD_READ,
+		      1, p->user_data, NULL))
+		return -EOPNOTSUPP;
+
+	ret = kernel_write(p->wf, &buf.cmd, sizeof(buf.cmd), 0);
+	state = (ret == sizeof(buf.cmd)) ? GET_REPLY : SEND_CMD;
+	if (signal_pending(current) && state == SEND_CMD) {
+		ioregion_save_ctx(vcpu, 1, addr, state, val);
+		return -EINTR;
+	}
+	if (ret != sizeof(buf.cmd)) {
+		ret = (ret < 0) ? ret : -EIO;
+		return (ret == -EAGAIN || ret == -EWOULDBLOCK) ? -EINVAL : ret;
+	}
+	if (!p->rf)
+		return 0;
+
+get_repl:
+	memset(&buf, 0, sizeof(buf));
+	ret = kernel_read(p->rf, &buf.resp, sizeof(buf.resp), 0);
+	state = (ret == sizeof(buf.resp)) ? COMPLETE : GET_REPLY;
+	if (signal_pending(current) && state == GET_REPLY) {
+		ioregion_save_ctx(vcpu, 1, addr, state, val);
+		return -EINTR;
+	}
+	if (ret != sizeof(buf.resp)) {
+		ret = (ret < 0) ? ret : -EIO;
+		return (ret == -EAGAIN || ret == -EWOULDBLOCK) ? -EINVAL : ret;
+	}
+
+	memcpy(val, &buf.resp.data, len);
+
+	return 0;
 }
 
 static int
 ioregion_write(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
 		int len, const void *val)
 {
-	return -EOPNOTSUPP;
+	struct ioregion *p = to_ioregion(this);
+	union {
+		struct ioregionfd_cmd cmd;
+		struct ioregionfd_resp resp;
+	} buf;
+	int ret = 0;
+	int state = SEND_CMD;
+
+	if (unlikely(vcpu->ioregion_ctx.is_interrupted)) {
+		vcpu->ioregion_ctx.is_interrupted = false;
+
+		switch (vcpu->ioregion_ctx.state) {
+		case SEND_CMD:
+			goto send_cmd;
+		case GET_REPLY:
+			goto get_repl;
+		default:
+			return -EINVAL;
+		}
+	}
+
+send_cmd:
+	memset(&buf, 0, sizeof(buf));
+	if (!pack_cmd(&buf.cmd, addr - p->paddr, len, IOREGIONFD_CMD_WRITE,
+		      p->posted_writes ? 0 : 1, p->user_data, val))
+		return -EOPNOTSUPP;
+
+	ret = kernel_write(p->wf, &buf.cmd, sizeof(buf.cmd), 0);
+	state = (ret == sizeof(buf.cmd)) ? GET_REPLY : SEND_CMD;
+	if (signal_pending(current) && state == SEND_CMD) {
+		ioregion_save_ctx(vcpu, 0, addr, state, (void *)val);
+		return -EINTR;
+	}
+	if (ret != sizeof(buf.cmd)) {
+		ret = (ret < 0) ? ret : -EIO;
+		return (ret == -EAGAIN || ret == -EWOULDBLOCK) ? -EINVAL : ret;
+	}
+
+get_repl:
+	if (!p->posted_writes) {
+		memset(&buf, 0, sizeof(buf));
+		ret = kernel_read(p->rf, &buf.resp, sizeof(buf.resp), 0);
+		state = (ret == sizeof(buf.resp)) ? COMPLETE : GET_REPLY;
+		if (signal_pending(current) && state == GET_REPLY) {
+			ioregion_save_ctx(vcpu, 0, addr, state, (void *)val);
+			return -EINTR;
+		}
+		if (ret != sizeof(buf.resp)) {
+			ret = (ret < 0) ? ret : -EIO;
+			return (ret == -EAGAIN || ret == -EWOULDBLOCK) ? -EINVAL : ret;
+		}
+	}
+
+	return 0;
 }
 
 /*
