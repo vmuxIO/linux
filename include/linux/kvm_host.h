@@ -320,6 +320,16 @@ struct kvm_vcpu {
 #endif
 	bool preempted;
 	bool ready;
+#ifdef CONFIG_KVM_IOREGION
+	struct {
+		u64 addr;
+		void *val;
+		int pio;
+		u8 state; /* SEND_CMD/GET_REPLY */
+		bool in;
+		bool is_interrupted;
+	} ioregion_ctx;
+#endif
 	struct kvm_vcpu_arch arch;
 	struct kvm_dirty_ring dirty_ring;
 };

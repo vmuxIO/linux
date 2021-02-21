@@ -5402,19 +5402,51 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 	return kvm_mmu_page_fault(vcpu, gpa, error_code, NULL, 0);
 }
 
+#ifdef CONFIG_KVM_IOREGION
+static int complete_ioregion_fast_mmio(struct kvm_vcpu *vcpu)
+{
+	int ret, idx;
+
+	idx = srcu_read_lock(&vcpu->kvm->srcu);
+	ret = kvm_io_bus_write(vcpu, KVM_FAST_MMIO_BUS,
+			       vcpu->ioregion_ctx.addr, 0, NULL);
+	if (ret) {
+		ret = kvm_mmu_page_fault(vcpu, vcpu->ioregion_ctx.addr,
+					 PFERR_RSVD_MASK, NULL, 0);
+		srcu_read_unlock(&vcpu->kvm->srcu, idx);
+		return ret;
+	}
+
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	return kvm_skip_emulated_instruction(vcpu);
+}
+#endif
+
 static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 {
 	gpa_t gpa;
+	int ret;
 
 	/*
 	 * A nested guest cannot optimize MMIO vmexits, because we have an
 	 * nGPA here instead of the required GPA.
 	 */
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
-	if (!is_guest_mode(vcpu) &&
-	    !kvm_io_bus_write(vcpu, KVM_FAST_MMIO_BUS, gpa, 0, NULL)) {
-		trace_kvm_fast_mmio(gpa);
-		return kvm_skip_emulated_instruction(vcpu);
+	if (!is_guest_mode(vcpu)) {
+		ret = kvm_io_bus_write(vcpu, KVM_FAST_MMIO_BUS, gpa, 0, NULL);
+		if (!ret) {
+			trace_kvm_fast_mmio(gpa);
+			return kvm_skip_emulated_instruction(vcpu);
+		}
+
+#ifdef CONFIG_KVM_IOREGION
+		if (unlikely(vcpu->ioregion_ctx.is_interrupted && ret == -EINTR)) {
+			vcpu->run->exit_reason = KVM_EXIT_INTR;
+			vcpu->arch.complete_userspace_io = complete_ioregion_fast_mmio;
+			++vcpu->stat.signal_exits;
+			return ret;
+		}
+#endif
 	}
 
 	return kvm_mmu_page_fault(vcpu, gpa, PFERR_RSVD_MASK, NULL, 0);

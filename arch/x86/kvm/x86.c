@@ -5967,18 +5967,32 @@ static int vcpu_mmio_write(struct kvm_vcpu *vcpu, gpa_t addr, int len,
 {
 	int handled = 0;
 	int n;
+	int ret = 0;
+	bool is_apic;
 
 	do {
 		n = min(len, 8);
-		if (!(lapic_in_kernel(vcpu) &&
-		      !kvm_iodevice_write(vcpu, &vcpu->arch.apic->dev, addr, n, v))
-		    && kvm_io_bus_write(vcpu, KVM_MMIO_BUS, addr, n, v))
-			break;
+		is_apic = lapic_in_kernel(vcpu) &&
+			  !kvm_iodevice_write(vcpu, &vcpu->arch.apic->dev,
+					      addr, n, v);
+		if (!is_apic) {
+			ret = kvm_io_bus_write(vcpu, KVM_MMIO_BUS,
+					       addr, n, v);
+			if (ret)
+				break;
+		}
 		handled += n;
 		addr += n;
 		len -= n;
 		v += n;
 	} while (len);
+
+#ifdef CONFIG_KVM_IOREGION
+	if (ret == -EINTR) {
+		vcpu->run->exit_reason = KVM_EXIT_INTR;
+		++vcpu->stat.signal_exits;
+	}
+#endif
 
 	return handled;
 }
@@ -5987,20 +6001,33 @@ static int vcpu_mmio_read(struct kvm_vcpu *vcpu, gpa_t addr, int len, void *v)
 {
 	int handled = 0;
 	int n;
+	int ret = 0;
+	bool is_apic;
 
 	do {
 		n = min(len, 8);
-		if (!(lapic_in_kernel(vcpu) &&
-		      !kvm_iodevice_read(vcpu, &vcpu->arch.apic->dev,
-					 addr, n, v))
-		    && kvm_io_bus_read(vcpu, KVM_MMIO_BUS, addr, n, v))
-			break;
+		is_apic = lapic_in_kernel(vcpu) &&
+			  !kvm_iodevice_read(vcpu, &vcpu->arch.apic->dev,
+					     addr, n, v);
+		if (!is_apic) {
+			ret = kvm_io_bus_read(vcpu, KVM_MMIO_BUS,
+					      addr, n, v);
+			if (ret)
+				break;
+		}
 		trace_kvm_mmio(KVM_TRACE_MMIO_READ, n, addr, v);
 		handled += n;
 		addr += n;
 		len -= n;
 		v += n;
 	} while (len);
+
+#ifdef CONFIG_KVM_IOREGION
+	if (ret == -EINTR) {
+		vcpu->run->exit_reason = KVM_EXIT_INTR;
+		++vcpu->stat.signal_exits;
+	}
+#endif
 
 	return handled;
 }
@@ -6397,6 +6424,13 @@ static int emulator_read_write_onepage(unsigned long addr, void *val,
 	if (!ret && ops->read_write_emulate(vcpu, gpa, val, bytes))
 		return X86EMUL_CONTINUE;
 
+#ifdef CONFIG_KVM_IOREGION
+	/* crossing a page boundary case is interrupted */
+	if (vcpu->ioregion_ctx.is_interrupted &&
+	    vcpu->run->exit_reason == KVM_EXIT_INTR)
+		goto out;
+#endif
+
 	/*
 	 * Is this MMIO handled locally?
 	 */
@@ -6404,6 +6438,7 @@ static int emulator_read_write_onepage(unsigned long addr, void *val,
 	if (handled == bytes)
 		return X86EMUL_CONTINUE;
 
+out:
 	gpa += handled;
 	bytes -= handled;
 	val += handled;
@@ -6461,6 +6496,12 @@ static int emulator_read_write(struct x86_emulate_ctxt *ctxt,
 
 	vcpu->mmio_needed = 1;
 	vcpu->mmio_cur_fragment = 0;
+
+#ifdef CONFIG_KVM_IOREGION
+	if (vcpu->ioregion_ctx.is_interrupted &&
+	    vcpu->run->exit_reason == KVM_EXIT_INTR)
+		return (vcpu->ioregion_ctx.in) ? X86EMUL_IO_NEEDED : X86EMUL_CONTINUE;
+#endif
 
 	vcpu->run->mmio.len = min(8u, vcpu->mmio_fragments[0].len);
 	vcpu->run->mmio.is_write = vcpu->mmio_is_write = ops->write;
@@ -6579,16 +6620,22 @@ static int kernel_pio(struct kvm_vcpu *vcpu, void *pd)
 
 	for (i = 0; i < vcpu->arch.pio.count; i++) {
 		if (vcpu->arch.pio.in)
-			r = kvm_io_bus_read(vcpu, KVM_PIO_BUS, vcpu->arch.pio.port,
+			r = kvm_io_bus_read(vcpu, KVM_PIO_BUS,
+					    vcpu->arch.pio.port,
 					    vcpu->arch.pio.size, pd);
 		else
 			r = kvm_io_bus_write(vcpu, KVM_PIO_BUS,
-					     vcpu->arch.pio.port, vcpu->arch.pio.size,
-					     pd);
+					     vcpu->arch.pio.port,
+					     vcpu->arch.pio.size, pd);
 		if (r)
 			break;
 		pd += vcpu->arch.pio.size;
 	}
+#ifdef CONFIG_KVM_IOREGION
+	if (vcpu->ioregion_ctx.is_interrupted && r == -EINTR)
+		vcpu->ioregion_ctx.pio = i;
+#endif
+
 	return r;
 }
 
@@ -6596,15 +6643,26 @@ static int emulator_pio_in_out(struct kvm_vcpu *vcpu, int size,
 			       unsigned short port, void *val,
 			       unsigned int count, bool in)
 {
+	int ret = 0;
+
 	vcpu->arch.pio.port = port;
 	vcpu->arch.pio.in = in;
 	vcpu->arch.pio.count  = count;
 	vcpu->arch.pio.size = size;
 
-	if (!kernel_pio(vcpu, vcpu->arch.pio_data)) {
+	ret = kernel_pio(vcpu, vcpu->arch.pio_data);
+	if (!ret) {
 		vcpu->arch.pio.count = 0;
 		return 1;
 	}
+
+#ifdef CONFIG_KVM_IOREGION
+	if (ret == -EINTR) {
+		vcpu->run->exit_reason = KVM_EXIT_INTR;
+		++vcpu->stat.signal_exits;
+		return 0;
+	}
+#endif
 
 	vcpu->run->exit_reason = KVM_EXIT_IO;
 	vcpu->run->io.direction = in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
@@ -7317,6 +7375,10 @@ static bool retry_instruction(struct x86_emulate_ctxt *ctxt,
 
 static int complete_emulated_mmio(struct kvm_vcpu *vcpu);
 static int complete_emulated_pio(struct kvm_vcpu *vcpu);
+#ifdef CONFIG_KVM_IOREGION
+static int complete_ioregion_io(struct kvm_vcpu *vcpu);
+static int complete_ioregion_fast_pio(struct kvm_vcpu *vcpu);
+#endif
 
 static void kvm_smm_changed(struct kvm_vcpu *vcpu)
 {
@@ -7592,6 +7654,14 @@ restart:
 		r = 1;
 		if (inject_emulated_exception(vcpu))
 			return r;
+#ifdef CONFIG_KVM_IOREGION
+	} else if (vcpu->ioregion_ctx.is_interrupted &&
+		   vcpu->run->exit_reason == KVM_EXIT_INTR) {
+		if (vcpu->ioregion_ctx.in)
+			writeback = false;
+		vcpu->arch.complete_userspace_io = complete_ioregion_io;
+		r = 0;
+#endif
 	} else if (vcpu->arch.pio.count) {
 		if (!vcpu->arch.pio.in) {
 			/* FIXME: return into emulator if single-stepping.  */
@@ -7688,6 +7758,12 @@ static int kvm_fast_pio_out(struct kvm_vcpu *vcpu, int size,
 		vcpu->arch.complete_userspace_io =
 			complete_fast_pio_out_port_0x7e;
 		kvm_skip_emulated_instruction(vcpu);
+#ifdef CONFIG_KVM_IOREGION
+	} else if (vcpu->ioregion_ctx.is_interrupted &&
+		   vcpu->run->exit_reason == KVM_EXIT_INTR) {
+		vcpu->arch.pio.linear_rip = kvm_get_linear_rip(vcpu);
+		vcpu->arch.complete_userspace_io = complete_ioregion_fast_pio;
+#endif
 	} else {
 		vcpu->arch.pio.linear_rip = kvm_get_linear_rip(vcpu);
 		vcpu->arch.complete_userspace_io = complete_fast_pio_out;
@@ -7736,6 +7812,14 @@ static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
 	}
 
 	vcpu->arch.pio.linear_rip = kvm_get_linear_rip(vcpu);
+
+#ifdef CONFIG_KVM_IOREGION
+	if (vcpu->ioregion_ctx.is_interrupted &&
+	    vcpu->run->exit_reason == KVM_EXIT_INTR) {
+		vcpu->arch.complete_userspace_io = complete_ioregion_fast_pio;
+		return 0;
+	}
+#endif
 	vcpu->arch.complete_userspace_io = complete_fast_pio_in;
 
 	return 0;
@@ -9472,6 +9556,163 @@ static int complete_emulated_mmio(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+#ifdef CONFIG_KVM_IOREGION
+static int complete_ioregion_access(struct kvm_vcpu *vcpu, u8 bus, gpa_t addr,
+				    int len, void *val)
+{
+	if (vcpu->ioregion_ctx.in)
+		return kvm_io_bus_read(vcpu, bus, addr, len, val);
+	else
+		return kvm_io_bus_write(vcpu, bus, addr, len, val);
+}
+
+static int complete_ioregion_mmio(struct kvm_vcpu *vcpu)
+{
+	struct kvm_mmio_fragment *frag;
+	int idx, ret, i, n;
+
+	idx = srcu_read_lock(&vcpu->kvm->srcu);
+	for (i = vcpu->mmio_cur_fragment; i < vcpu->mmio_nr_fragments; i++) {
+		frag = &vcpu->mmio_fragments[i];
+		do {
+			n = min(8u, frag->len);
+			ret = complete_ioregion_access(vcpu, KVM_MMIO_BUS,
+						       frag->gpa, n, frag->data);
+			if (ret < 0)
+				goto do_exit;
+			frag->len -= n;
+			frag->data += n;
+			frag->gpa += n;
+		} while (frag->len);
+		vcpu->mmio_cur_fragment++;
+	}
+
+	vcpu->mmio_needed = 0;
+	if (!vcpu->ioregion_ctx.in) {
+		ret = 1;
+		goto out;
+	}
+
+	vcpu->mmio_read_completed = 1;
+	ret = kvm_emulate_instruction(vcpu, EMULTYPE_NO_DECODE);
+	goto out;
+
+do_exit:
+	if (ret != -EOPNOTSUPP) {
+		vcpu->arch.complete_userspace_io = complete_ioregion_mmio;
+		goto out;
+	}
+
+	/* if ioregion is removed KVM needs to return with KVM_EXIT_MMIO */
+	vcpu->run->exit_reason = KVM_EXIT_MMIO;
+	vcpu->run->mmio.phys_addr = frag->gpa;
+	if (!vcpu->ioregion_ctx.in)
+		memcpy(vcpu->run->mmio.data, frag->data, n);
+	vcpu->run->mmio.len = n;
+	vcpu->run->mmio.is_write = !vcpu->ioregion_ctx.in;
+	vcpu->arch.complete_userspace_io = complete_emulated_mmio;
+	ret = 0;
+out:
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	return ret;
+}
+
+static int complete_ioregion_pio(struct kvm_vcpu *vcpu)
+{
+	int i, idx, ret;
+	unsigned long off;
+
+	idx = srcu_read_lock(&vcpu->kvm->srcu);
+
+	for (i = vcpu->ioregion_ctx.pio; i < vcpu->arch.pio.count; i++) {
+		ret = complete_ioregion_access(vcpu, KVM_PIO_BUS, vcpu->arch.pio.port,
+					       vcpu->arch.pio.size,
+					       vcpu->ioregion_ctx.val);
+		if (ret < 0)
+			goto do_exit;
+		vcpu->ioregion_ctx.val += vcpu->arch.pio.size;
+	}
+
+	ret = 1;
+	if (vcpu->ioregion_ctx.in)
+		ret = kvm_emulate_instruction(vcpu, EMULTYPE_NO_DECODE);
+	vcpu->arch.pio.count = 0;
+	goto out;
+
+do_exit:
+	if (ret != -EOPNOTSUPP) {
+		vcpu->ioregion_ctx.pio = i;
+		vcpu->arch.complete_userspace_io = complete_ioregion_pio;
+		goto out;
+	}
+
+	/* if ioregion is removed KVM needs to return with KVM_EXIT_IO */
+	off = vcpu->ioregion_ctx.val - vcpu->arch.pio_data;
+	vcpu->run->exit_reason = KVM_EXIT_IO;
+	vcpu->run->io.direction = vcpu->ioregion_ctx.in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
+	vcpu->run->io.size = vcpu->arch.pio.size;
+	vcpu->run->io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE + off;
+	vcpu->run->io.count = vcpu->arch.pio.count - i;
+	vcpu->run->io.port = vcpu->arch.pio.port;
+	if (vcpu->ioregion_ctx.in)
+		vcpu->arch.complete_userspace_io = complete_emulated_pio;
+	else
+		vcpu->arch.pio.count = 0;
+	ret = 0;
+out:
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	return ret;
+}
+
+static int complete_ioregion_fast_pio(struct kvm_vcpu *vcpu)
+{
+	int idx, ret;
+	u64 val;
+
+	idx = srcu_read_lock(&vcpu->kvm->srcu);
+	ret = complete_ioregion_access(vcpu, KVM_PIO_BUS, vcpu->arch.pio.port,
+				       vcpu->arch.pio.size, vcpu->ioregion_ctx.val);
+	if (ret < 0)
+		goto do_exit;
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+
+	if (vcpu->ioregion_ctx.in) {
+		val = 0;
+		memcpy(&val, vcpu->ioregion_ctx.val, vcpu->arch.pio.size);
+		kvm_rax_write(vcpu, val);
+	}
+	vcpu->arch.pio.count = 0;
+	return kvm_skip_emulated_instruction(vcpu);
+
+do_exit:
+	if (ret != -EOPNOTSUPP) {
+		vcpu->arch.complete_userspace_io = complete_ioregion_fast_pio;
+		goto out;
+	}
+
+	vcpu->run->exit_reason = KVM_EXIT_IO;
+	vcpu->run->io.direction = vcpu->ioregion_ctx.in ? KVM_EXIT_IO_IN : KVM_EXIT_IO_OUT;
+	vcpu->run->io.size = vcpu->arch.pio.size;
+	vcpu->run->io.data_offset = KVM_PIO_PAGE_OFFSET * PAGE_SIZE;
+	vcpu->run->io.count = 1;
+	vcpu->run->io.port = vcpu->arch.pio.port;
+	vcpu->arch.complete_userspace_io = vcpu->ioregion_ctx.in ?
+			complete_fast_pio_in : complete_fast_pio_out;
+	ret = 0;
+out:
+	srcu_read_unlock(&vcpu->kvm->srcu, idx);
+	return ret;
+}
+
+static int complete_ioregion_io(struct kvm_vcpu *vcpu)
+{
+	if (vcpu->mmio_needed)
+		return complete_ioregion_mmio(vcpu);
+	BUG_ON(vcpu->arch.pio.count == 0);
+	return complete_ioregion_pio(vcpu);
+}
+#endif /* CONFIG_KVM_IOREGION */
+
 static void kvm_save_current_fpu(struct fpu *fpu)
 {
 	/*
@@ -9587,6 +9828,12 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		r = -EINTR;
 	else
 		r = vcpu_run(vcpu);
+
+#ifdef CONFIG_KVM_IOREGION
+	if (vcpu->ioregion_ctx.is_interrupted &&
+	    vcpu->run->exit_reason == KVM_EXIT_INTR)
+		r = -EINTR;
+#endif
 
 out:
 	kvm_put_guest_fpu(vcpu);
