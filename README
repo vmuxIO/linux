@@ -1,3 +1,12 @@
+Note about this branch
+======================
+
+Reading diffs is so boring, therefore I'm using this branch to manually
+reimplement the patch from branch peter/5.12.14-v0 from afe5d2361cfa
+(v5.12.14) to 56b6b3611b3a, to get a better feel for how KVM and IoRegionFd
+works under the hood.
+
+
 Linux kernel
 ============
 
