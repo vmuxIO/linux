@@ -3,6 +3,7 @@
 #include <linux/kvm.h>
 #include <linux/list.h>
 #include <kvm/iodev.h>
+#include <linux/kernel.h>
 #include "eventfd.h"
 
 /* Wire protocol */
@@ -118,6 +119,146 @@ pack_cmd(struct ioregionfd_cmd *cmd, u64 offset, u64 len, int opt, bool resp,
 
 	return true;
 }
+
+static int
+ioregion_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
+		int len, void *val)
+{
+	struct ioregion *p = to_ioregion(this);
+	struct ioregionfd_cmd *cmd;
+	struct ioregionfd_resp *resp;
+	size_t buf_size;
+	void *buf;
+	int ret = 0;
+
+	if ((p->ctx->rf->f_flags & O_NONBLOCK) || (p->wf->f_flags & O_NONBLOCK))
+		return -EINVAL;
+	if ((addr + len - 1) > (p->paddr + p->size - 1))
+		return -EINVAL;
+
+	buf_size = max_t(size_t, sizeof(*cmd), sizeof(*resp));
+	buf = kzalloc(buf_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	cmd = (struct ioregionfd_cmd *)buf;
+	resp = (struct ioregionfd_resp *)buf;
+	if (!pack_cmd(cmd, addr - p->paddr, len, IOREGIONFD_CMD_READ,
+		      1, p->user_data, NULL)) {
+		kfree(buf);
+		return -EOPNOTSUPP;
+	}
+
+	mutex_lock_interruptible(&p->ctx->mutex);
+
+	ret = kernel_write(p->wf, cmd, sizeof(*cmd), 0);
+	if (ret != sizeof(*cmd)) {
+		ret = (ret < 0) ? ret : -EIO;
+		goto out;
+	}
+	memset(buf, 0, buf_size);
+	ret = kernel_read(p->ctx->rf, resp, sizeof(*resp), 0);
+	if (ret != sizeof(*resp)) {
+		ret = (ret < 0) ? ret : -EIO;
+		goto out;
+	}
+
+	switch (len) {
+	case 1:
+		*(u8 *)val = (u8)resp->data;
+		break;
+	case 2:
+		*(u16 *)val = (u16)resp->data;
+		break;
+	case 4:	
+		*(u32 *)val = (u32)resp->data;
+		break;
+	case 8:
+		*(u64 *)val = (u64)resp->data;
+		break;
+	default:
+		break;
+	}
+
+	ret = 0;
+
+out:
+	mutex_unlock(&p->ctx->mutex);
+	kfree(buf);
+
+	return ret;
+}
+
+static int
+ioregion_write(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
+		int len, const void *val)
+{
+	struct ioregion *p = to_ioregion(this);
+	struct ioregionfd_cmd *cmd;
+	struct ioregionfd_resp *resp;
+	size_t buf_size = 0;
+	void *buf;
+	int ret = 0;
+
+	if ((p->ctx->rf->f_flags & O_NONBLOCK) || (p->wf->f_flags & O_NONBLOCK))
+		return -EINVAL;
+	if ((addr + len - 1) > (p->paddr + p->size - 1))
+		return -EINVAL;
+
+	buf_size = max_t(size_t, sizeof(*cmd), sizeof(*resp));
+	buf = kzalloc(buf_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	cmd = (struct ioregionfd_cmd *)buf;
+	if (!pack_cmd(cmd, addr - p->paddr, len, IOREGIONFD_CMD_WRITE,
+		      p->posted_writes ? 0 : 1, p->user_data, val)) {
+		kfree(buf);
+		return -EOPNOTSUPP;
+	}
+
+	mutex_lock_interruptible(&p->ctx->mutex);
+
+	ret = kernel_write(p->wf, cmd, sizeof(*cmd), 0);
+	if (ret != sizeof(*cmd)) {
+		ret = (ret < 0) ? ret : -EIO;
+		goto out;
+	}
+
+	if (!p->posted_writes) {
+		memset(buf, 0, buf_size);
+		resp = (struct ioregionfd_resp *)buf;
+		ret = kernel_read(p->ctx->rf, resp, sizeof(*resp), 0);
+		if (ret != sizeof(*resp)) {
+			ret = (ret < 0) ? ret : -EIO;
+			goto out;
+		}
+	}
+
+	ret = 0;
+
+out:
+	mutex_unlock(&p->ctx->mutex);
+	kfree(buf);
+
+	return ret;
+}
+
+/*
+ * This function is caled as KVM is completely shutting down.  We do not
+ * need to worry about locking just nuke anything we have as quickly as possible
+ */
+static void
+ioregion_descructor(struct kvm_io_device *this)
+{
+	struct ioregion *p = to_ioregion(this);
+
+	ioregion_release(p);
+}
+
+static const struct kvm_io_device_ops ioregion_ops = {
+	.read       = ioregion_read,
+	.write      = ioregion_write,
+	.destructor = ioregion_descructor,
+};
 
 static inline struct list_head *
 get_ioregion_list(struct kvm *kvm, enum kvm_bus bus_idx)
