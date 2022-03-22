@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
+#include <linux/list.h>
 #include <kvm/iodev.h>
 
 /* Wire protocol */
@@ -29,6 +30,13 @@ struct ioregionfd_resp {
 #define IOREGIONFD_RESP_OFFSET 6
 #define IOREGIONFD_SIZE(x) ((x) << IOREGIONFD_SIZE_OFFSET)
 #define IOREGIONFD_RESP(x) ((x) << IOREGIONFD_RESP_OFFSET)
+
+void
+kvm_ioregionfd_init(struct kvm *kvm)
+{
+	INIT_LIST_HEAD(&kvm->ioregions_mmio);
+	INIT_LIST_HEAD(&kvm->ioregions_pio);
+}
 
 /* serialize ioregionfd cmds/replies in case
  * different ioregions use same rfd

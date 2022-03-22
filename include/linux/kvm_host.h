@@ -483,6 +483,10 @@ struct kvm {
 	} irqfds;
 	struct list_head ioeventfds;
 #endif
+#ifdef CONFIG_KVM_IOREGION
+        struct list_head ioregions_mmio;
+        struct list_head ioregions_pio;
+#endif
 	struct kvm_vm_stat stat;
 	struct kvm_arch arch;
 	refcount_t users_count;
@@ -1303,6 +1307,14 @@ static inline int kvm_ioeventfd(struct kvm *kvm, struct kvm_ioeventfd *args)
 }
 
 #endif /* CONFIG_HAVE_KVM_EVENTFD */
+
+#ifdef CONFIG_KVM_IOREGION
+void kvm_ioregionfd_init(struct kvm *kvm);
+
+#else
+
+static inline void kvm_ioregionfd_init(struct kvm *kvm) {}
+#endif
 
 void kvm_arch_irq_routing_update(struct kvm *kvm);
 
