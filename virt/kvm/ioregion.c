@@ -59,6 +59,12 @@ struct ioregion {
 	struct ioregionfd    *ctx;
 };
 
+static inline struct ioregion *
+to_ioregion(struct kvm_io_device *dev)
+{
+	return container_of(dev, struct ioregion, dev);
+}
+
 static inline struct list_head *
 get_ioregion_list(struct kvm *kvm, enum kvm_bus bus_idx)
 {
