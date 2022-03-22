@@ -43,7 +43,7 @@ kvm_ioregionfd_init(struct kvm *kvm)
  * different ioregions use same rfd
  */
 struct ioregionfd {
-	struct file          *rd;
+	struct file          *rf;
 	struct mutex         mutex;
 	struct kref          kref;
 };
@@ -63,6 +63,25 @@ static inline struct ioregion *
 to_ioregion(struct kvm_io_device *dev)
 {
 	return container_of(dev, struct ioregion, dev);
+}
+
+/* assumes kvm->slots_lock_held */
+static void ctx_free(struct kref *kref)
+{
+	struct ioregionfd *ctx = container_of(kref, struct ioregionfd, kref);
+
+	kfree(ctx);
+}
+
+/* assumes kvm->slots_lock held */
+static void
+ioregion_release(struct ioregion *p)
+{
+	fput(p->ctx->rf);
+	fput(p->wf);
+	list_del(&p->list);
+	kref_put(&p->ctx->kref, ctx_free);
+	kfree(p);
 }
 
 static inline struct list_head *
