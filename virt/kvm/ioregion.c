@@ -84,6 +84,41 @@ ioregion_release(struct ioregion *p)
 	kfree(p);
 }
 
+static bool
+pack_cmd(struct ioregionfd_cmd *cmd, u64 offset, u64 len, int opt, bool resp,
+	u64 user_data, const void *val)
+{
+	u64 size = 0;
+
+	switch (len) {
+	case 1:
+		size = IOREGIONFD_SIZE_8BIT;
+		*((u8 *)&cmd->data) = val ? *(u8 *)val : 0;
+		break;
+	case 2:
+		size = IOREGIONFD_SIZE_16BIT;
+		*((u16 *)&cmd->data) = val ? *(u16 *)val : 0;
+		break;
+	case 4:
+		size = IOREGIONFD_SIZE_32BIT;
+		*((u32 *)&cmd->data) = val ? *(u32 *)val : 0;
+		break;
+	case 8:
+		size = IOREGIONFD_SIZE_64BIT;
+		*((u64 *)&cmd->data) = val ? *(u64 *)val : 0;
+		break;
+	default:
+		return false;
+	}
+	cmd->user_data = user_data;
+	cmd->offset = offset;
+	cmd->info |= opt;
+	cmd->info |= IOREGIONFD_SIZE(size);
+	cmd->info |= IOREGIONFD_RESP(resp);
+
+	return true;
+}
+
 static inline struct list_head *
 get_ioregion_list(struct kvm *kvm, enum kvm_bus bus_idx)
 {
