@@ -3,6 +3,7 @@
 #include <linux/kvm.h>
 #include <linux/list.h>
 #include <kvm/iodev.h>
+#include "eventfd.h"
 
 /* Wire protocol */
 struct ioregionfd_cmd {
@@ -63,4 +64,41 @@ get_ioregion_list(struct kvm *kvm, enum kvm_bus bus_idx)
 {
 	return (bus_idx == KVM_MMIO_BUS) ?
 		&kvm->ioregions_mmio : &kvm->ioregions_pio;
+}
+
+/* check for not overlapping case and reverse */
+inline bool
+overlap(u64 start1, u64 size1, u64 start2, u64 size2)
+{
+	u64 end1 = start1 + size1 - 1;
+	u64 end2 = start2 + size2 - 1;
+
+	return !(end1 < start2 || start1 >= end2);
+}
+
+/* assumes kvm->slots_lock held */
+bool
+kvm_ioregion_collides(struct kvm *kvm, int bus_idx,
+		u64 start, u64 size)
+{
+	struct ioregion *_p;
+	struct list_head *ioregions;
+
+	ioregions = get_ioregion_list(kvm, bus_idx);
+	list_for_each_entry(_p, ioregions, list)
+		if (overlap(start, size, _p->paddr, _p->size))
+			return true;
+
+	return false;
+}
+
+/* assumes kvm->slots_lock held */
+static bool
+ioregion_collision(struct kvm *kvm, struct ioregion *p, enum kvm_bus bus_idx)
+{
+	if (kvm_ioregion_collides(kvm, bus_idx, p->paddr, p->size) ||
+	    kvm_eventfd_collides(kvm, bus_idx, p->paddr, p->size))
+		return true;
+
+	return false;
 }
