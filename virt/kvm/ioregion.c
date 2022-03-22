@@ -57,3 +57,10 @@ struct ioregion {
 	bool                 posted_writes;
 	struct ioregionfd    *ctx;
 };
+
+static inline struct list_head *
+get_ioregion_list(struct kvm *kvm, enum kvm_bus bus_idx)
+{
+	return (bus_idx == KVM_MMIO_BUS) ?
+		&kvm->ioregions_mmio : &kvm->ioregions_pio;
+}
