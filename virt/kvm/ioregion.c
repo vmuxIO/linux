@@ -148,7 +148,7 @@ ioregion_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
 		return -EOPNOTSUPP;
 	}
 
-	mutex_lock_interruptible(&p->ctx->mutex);
+	ret = mutex_lock_interruptible(&p->ctx->mutex);
 
 	ret = kernel_write(p->wf, cmd, sizeof(*cmd), 0);
 	if (ret != sizeof(*cmd)) {
@@ -215,7 +215,7 @@ ioregion_write(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
 		return -EOPNOTSUPP;
 	}
 
-	mutex_lock_interruptible(&p->ctx->mutex);
+	ret = mutex_lock_interruptible(&p->ctx->mutex);
 
 	ret = kernel_write(p->wf, cmd, sizeof(*cmd), 0);
 	if (ret != sizeof(*cmd)) {
