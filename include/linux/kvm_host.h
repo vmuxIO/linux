@@ -1310,10 +1310,15 @@ static inline int kvm_ioeventfd(struct kvm *kvm, struct kvm_ioeventfd *args)
 
 #ifdef CONFIG_KVM_IOREGION
 void kvm_ioregionfd_init(struct kvm *kvm);
+int kvm_ioregionfd(struct kvm *kvm, struct kvm_ioregion *args);
 
 #else
 
 static inline void kvm_ioregionfd_init(struct kvm *kvm) {}
+static inline int kvm_ioregionfd(struct kvm *kvm, struct kvm_ioregion *args)
+{
+	return -ENOSYS;
+}
 #endif
 
 void kvm_arch_irq_routing_update(struct kvm *kvm);
