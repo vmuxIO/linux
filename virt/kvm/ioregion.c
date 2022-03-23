@@ -46,7 +46,7 @@ kvm_ioregionfd_init(struct kvm *kvm)
  * different ioregions use same rfd
  */
 struct ioregionfd {
-	struct file          *rf;
+	struct file         *rf;
 	struct mutex         mutex;
 	struct kref          kref;
 };
@@ -55,11 +55,11 @@ struct ioregion {
 	struct list_head     list;
 	u64                  paddr;
 	u64                  size;
-	struct file          *wf;
+	struct file         *wf;
 	u64                  user_data;
 	struct kvm_io_device dev;
 	bool                 posted_writes;
-	struct ioregionfd    *ctx;
+	struct ioregionfd   *ctx;
 };
 
 static inline struct ioregion *
@@ -68,7 +68,7 @@ to_ioregion(struct kvm_io_device *dev)
 	return container_of(dev, struct ioregion, dev);
 }
 
-/* assumes kvm->slots_lock_held */
+/* assumes kvm->slots_lock held */
 static void ctx_free(struct kref *kref)
 {
 	struct ioregionfd *ctx = container_of(kref, struct ioregionfd, kref);
@@ -89,7 +89,7 @@ ioregion_release(struct ioregion *p)
 
 static bool
 pack_cmd(struct ioregionfd_cmd *cmd, u64 offset, u64 len, int opt, bool resp,
-	u64 user_data, const void *val)
+	 u64 user_data, const void *val)
 {
 	u64 size = 0;
 
@@ -124,7 +124,7 @@ pack_cmd(struct ioregionfd_cmd *cmd, u64 offset, u64 len, int opt, bool resp,
 
 static int
 ioregion_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
-		int len, void *val)
+	      int len, void *val)
 {
 	struct ioregion *p = to_ioregion(this);
 	struct ioregionfd_cmd *cmd;
@@ -171,7 +171,7 @@ ioregion_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this, gpa_t addr,
 	case 2:
 		*(u16 *)val = (u16)resp->data;
 		break;
-	case 4:	
+	case 4:
 		*(u32 *)val = (u32)resp->data;
 		break;
 	case 8:
@@ -245,11 +245,11 @@ out:
 }
 
 /*
- * This function is caled as KVM is completely shutting down.  We do not
+ * This function is called as KVM is completely shutting down.  We do not
  * need to worry about locking just nuke anything we have as quickly as possible
  */
 static void
-ioregion_descructor(struct kvm_io_device *this)
+ioregion_destructor(struct kvm_io_device *this)
 {
 	struct ioregion *p = to_ioregion(this);
 
@@ -259,7 +259,7 @@ ioregion_descructor(struct kvm_io_device *this)
 static const struct kvm_io_device_ops ioregion_ops = {
 	.read       = ioregion_read,
 	.write      = ioregion_write,
-	.destructor = ioregion_descructor,
+	.destructor = ioregion_destructor,
 };
 
 static inline struct list_head *
@@ -282,7 +282,7 @@ overlap(u64 start1, u64 size1, u64 start2, u64 size2)
 /* assumes kvm->slots_lock held */
 bool
 kvm_ioregion_collides(struct kvm *kvm, int bus_idx,
-		u64 start, u64 size)
+		      u64 start, u64 size)
 {
 	struct ioregion *_p;
 	struct list_head *ioregions;
@@ -341,7 +341,8 @@ ioregion_get_ctx(struct kvm *kvm, struct ioregion *p, struct file *rf, int bus_i
 	return true;
 }
 
-int kvm_set_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
+int
+kvm_set_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
 {
 	struct ioregion *p;
 	bool is_posted_writes;
@@ -397,8 +398,7 @@ int kvm_set_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
 
 	kvm_iodevice_init(&p->dev, &ioregion_ops);
 	ret = kvm_io_bus_register_dev(kvm, bus_idx, p->paddr, p->size,
-			&p->dev);
-
+				      &p->dev);
 	if (ret < 0)
 		goto unlock_fail;
 	list_add_tail(&p->list, get_ioregion_list(kvm, bus_idx));
@@ -419,10 +419,10 @@ fail:
 static int
 kvm_rm_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
 {
-	struct ioregion          *p, *tmp;
+	struct ioregion         *p, *tmp;
 	enum kvm_bus             bus_idx;
-	int                      ret = -ENOMEM;
-	struct list_head         *ioregions;
+	int                      ret = -ENOENT;
+	struct list_head        *ioregions;
 
 	if (args->rfd != -1 || args->wfd != -1)
 		return -EINVAL;
@@ -434,7 +434,7 @@ kvm_rm_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
 
 	list_for_each_entry_safe(p, tmp, ioregions, list) {
 		if (p->paddr == args->guest_paddr  &&
-			p->size == args->memory_size) {
+		    p->size == args->memory_size) {
 			kvm_io_bus_unregister_dev(kvm, bus_idx, &p->dev);
 			ioregion_release(p);
 			ret = 0;
