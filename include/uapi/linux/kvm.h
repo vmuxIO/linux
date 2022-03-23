@@ -754,6 +754,27 @@ struct kvm_ioeventfd {
 	__u8  pad[36];
 };
 
+enum {
+	kvm_ioregion_flag_nr_pio,
+	kvm_ioregion_flag_nr_posted_writes,
+	kvm_ioregion_flag_nr_max,
+};
+
+#define KVM_IOREGION_PIO (1 << kvm_ioregion_flag_nr_pio)
+#define KVM_IOREGION_POSTED_WRITES (1 << kvm_ioregion_flag_nr_posted_writes)
+
+#define KVM_IOREGION_VALID_FLAG_MASK ((1 << kvm_ioregion_flag_nr_max) - 1)
+
+struct kvm_ioregion {
+	__u64 guest_paddr; /* guest physical address */
+	__u64 memory_size; /* bytes */
+	__u64 user_data;
+	__s32 rfd;
+	__s32 wfd;
+	__u32 flags;
+	__u8  pad[28];
+};
+
 #define KVM_X86_DISABLE_EXITS_MWAIT          (1 << 0)
 #define KVM_X86_DISABLE_EXITS_HLT            (1 << 1)
 #define KVM_X86_DISABLE_EXITS_PAUSE          (1 << 2)

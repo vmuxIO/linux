@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
+#include <linux/file.h>
+#include <linux/fs.h>
 #include <linux/list.h>
 #include <kvm/iodev.h>
 #include <linux/kernel.h>
@@ -302,4 +304,153 @@ ioregion_collision(struct kvm *kvm, struct ioregion *p, enum kvm_bus bus_idx)
 		return true;
 
 	return false;
+}
+
+static enum kvm_bus
+get_bus_from_flags(__u32 flags)
+{
+	if (flags & KVM_IOREGION_PIO)
+		return KVM_PIO_BUS;
+	return KVM_MMIO_BUS;
+}
+
+/* assumes kvm->slots_lock held */
+static bool
+ioregion_get_ctx(struct kvm *kvm, struct ioregion *p, struct file *rf, int bus_idx)
+{
+	struct ioregion *_p;
+	struct list_head *ioregions;
+
+	ioregions = get_ioregion_list(kvm, bus_idx);
+	list_for_each_entry(_p, ioregions, list)
+		if (file_inode(_p->ctx->rf)->i_ino == file_inode(rf)->i_ino) {
+			p->ctx = _p->ctx;
+			kref_get(&p->ctx->kref);
+			return true;
+		}
+
+	p->ctx = kzalloc(sizeof(*p->ctx), GFP_KERNEL_ACCOUNT);
+	if (!p->ctx) {
+		kfree(p);
+		return false;
+	}
+	p->ctx->rf = rf;
+	mutex_init(&p->ctx->mutex);
+	kref_get(&p->ctx->kref);
+
+	return true;
+}
+
+int kvm_set_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
+{
+	struct ioregion *p;
+	bool is_posted_writes;
+	struct file *rfile, *wfile;
+	enum kvm_bus bus_idx;
+	int ret = 0;
+
+	if (!args->memory_size)
+		return -EINVAL;
+	if ((args->guest_paddr + args->memory_size - 1) < args->guest_paddr)
+		return -EINVAL;
+	if (args->flags & ~KVM_IOREGION_VALID_FLAG_MASK)
+		return -EINVAL;
+
+	rfile = fget(args->rfd);
+	if (!rfile)
+		return -EBADF;
+	wfile = fget(args->wfd);
+	if (!wfile) {
+		fput(rfile);
+		return -EBADF;
+	}
+	if ((rfile->f_flags & O_NONBLOCK) || (wfile->f_flags & O_NONBLOCK)) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	p = kzalloc(sizeof(*p), GFP_KERNEL_ACCOUNT);
+	if (!p) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	INIT_LIST_HEAD(&p->list);
+	p->wf = wfile;
+	p->paddr = args->guest_paddr;
+	p->size = args->memory_size;
+	p->user_data = args->user_data;
+	is_posted_writes = args->flags & KVM_IOREGION_POSTED_WRITES;
+	p->posted_writes = is_posted_writes ? true : false;
+	bus_idx = get_bus_from_flags(args->flags);
+
+	mutex_lock(&kvm->slots_lock);
+
+	if (ioregion_collision(kvm, p, bus_idx)) {
+		ret = -EEXIST;
+		goto unlock_fail;
+	}
+
+	if (!ioregion_get_ctx(kvm, p, rfile, bus_idx)) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	kvm_iodevice_init(&p->dev, &ioregion_ops);
+	ret = kvm_io_bus_register_dev(kvm, bus_idx, p->paddr, p->size,
+			&p->dev);
+
+	if (ret < 0)
+		goto unlock_fail;
+	list_add_tail(&p->list, get_ioregion_list(kvm, bus_idx));
+
+	mutex_unlock(&kvm->slots_lock);
+
+	return 0;
+
+unlock_fail:
+	mutex_unlock(&kvm->slots_lock);
+	kfree(p);
+fail:
+	fput(rfile);
+	fput(wfile);
+	return ret;
+}
+
+static int
+kvm_rm_ioregion(struct kvm *kvm, struct kvm_ioregion *args)
+{
+	struct ioregion          *p, *tmp;
+	enum kvm_bus             bus_idx;
+	int                      ret = -ENOMEM;
+	struct list_head         *ioregions;
+
+	if (args->rfd != -1 || args->wfd != -1)
+		return -EINVAL;
+
+	bus_idx = get_bus_from_flags(args->flags);
+	ioregions = get_ioregion_list(kvm, bus_idx);
+
+	mutex_lock(&kvm->slots_lock);
+
+	list_for_each_entry_safe(p, tmp, ioregions, list) {
+		if (p->paddr == args->guest_paddr  &&
+			p->size == args->memory_size) {
+			kvm_io_bus_unregister_dev(kvm, bus_idx, &p->dev);
+			ioregion_release(p);
+			ret = 0;
+			break;
+		}
+	}
+
+	mutex_unlock(&kvm->slots_lock);
+
+	return ret;
+}
+
+int
+kvm_ioregionfd(struct kvm *kvm, struct kvm_ioregion *args)
+{
+	if (args->rfd == -1 || args->wfd == -1)
+		return kvm_rm_ioregion(kvm, args);
+	return kvm_set_ioregion(kvm, args);
 }
